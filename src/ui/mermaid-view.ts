@@ -1,21 +1,89 @@
 /**
- * Mermaid View Component
- * Generates and displays Mermaid.js diagrams from semantic tags
+ * Semantic map view.
+ *
+ * Renders the tags in a note as a Mermaid graph plus a readable tag list.
+ * Node shapes come from each category's palette slot, so a user-defined
+ * taxonomy gets a consistent look without any category names being baked in.
  */
 
 import { ItemView, WorkspaceLeaf, Notice } from 'obsidian';
-import { SemanticTag, TagType, SemanticAISettings } from '../types';
+import {
+  SemanticTag,
+  SemanticAISettings,
+  categoryColor,
+  categoryName
+} from '../types';
 import { buildTagHierarchy } from '../tagging/tag-writer';
 
 export const MERMAID_VIEW_TYPE = 'semantic-ai-mermaid-view';
 
+/** One Mermaid node shape per palette slot. */
+const SHAPES: { open: string; close: string }[] = [
+  { open: '([', close: '])' },   // stadium
+  { open: '[', close: ']' },     // rectangle
+  { open: '[(', close: ')]' },   // cylinder
+  { open: '{{', close: '}}' },   // hexagon
+  { open: '((', close: '))' },   // circle
+  { open: '[[', close: ']]' },   // subroutine
+  { open: '{', close: '}' },     // rhombus
+  { open: '>', close: ']' }      // asymmetric
+];
+
+function shapeForColor(color: number): { open: string; close: string } {
+  return SHAPES[(color - 1) % SHAPES.length];
+}
+
+/** Escape a label so it cannot break out of a Mermaid node. */
+function escapeLabel(label: string): string {
+  const cleaned = label
+    .replace(/["`]/g, "'")
+    .replace(/[[\]{}()<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned.length > 60 ? `${cleaned.slice(0, 60)}…` : cleaned;
+}
+
 /**
- * Mermaid View for displaying semantic graphs
+ * Build the Mermaid source for a set of tags.
+ * Exported so notes and the panel render exactly the same graph.
  */
+export function buildMermaid(
+  tags: SemanticTag[],
+  direction: 'TD' | 'LR' | 'BT' | 'RL' = 'TD',
+  settings?: SemanticAISettings
+): string {
+  if (tags.length === 0) {
+    return '';
+  }
+
+  const lines: string[] = [`graph ${direction}`];
+  const nodeIds = new Map<string, string>();
+
+  tags.forEach((tag, index) => {
+    const nodeId = `n${index}`;
+    nodeIds.set(tag.uuid, nodeId);
+
+    const color = settings ? categoryColor(settings, tag.type) : 1;
+    const shape = shapeForColor(color);
+    const typeLabel = settings ? categoryName(settings, tag.customType || tag.type) : tag.type;
+
+    lines.push(`  ${nodeId}${shape.open}"${escapeLabel(`${typeLabel}: ${tag.label}`)}"${shape.close}`);
+  });
+
+  for (const tag of tags) {
+    if (tag.parentUuid && nodeIds.has(tag.parentUuid)) {
+      lines.push(`  ${nodeIds.get(tag.parentUuid)} --> ${nodeIds.get(tag.uuid)}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export class MermaidView extends ItemView {
   private settings: SemanticAISettings;
   private currentTags: SemanticTag[] = [];
-  private currentFilePath: string = '';
+  private currentFilePath = '';
 
   constructor(leaf: WorkspaceLeaf, settings: SemanticAISettings) {
     super(leaf);
@@ -27,139 +95,102 @@ export class MermaidView extends ItemView {
   }
 
   getDisplayText(): string {
-    return 'Semantic Graph';
+    return 'Semantic map';
   }
 
   getIcon(): string {
     return 'git-branch';
   }
 
-  /**
-   * Update settings reference
-   */
   updateSettings(settings: SemanticAISettings): void {
     this.settings = settings;
     this.refresh();
   }
 
-  /**
-   * Set tags to display
-   */
   setTags(tags: SemanticTag[], filePath: string): void {
     this.currentTags = tags;
     this.currentFilePath = filePath;
     this.refresh();
   }
 
-  /**
-   * Clear the view
-   */
   clear(): void {
     this.currentTags = [];
     this.currentFilePath = '';
     this.refresh();
   }
 
-  /**
-   * Refresh the view
-   */
   refresh(): void {
-    const container = this.containerEl.children[1];
+    const container = this.contentEl;
     container.empty();
+    container.addClass('semantic-ai-map-view');
 
     if (this.currentTags.length === 0) {
-      container.createEl('div', {
+      container.createDiv({
         cls: 'semantic-ai-empty-state',
-        text: 'No semantic tags found. Run AI Classifier to analyze a note.'
+        text: 'No tags in this note yet. Run a classification to fill this in.'
       });
       return;
     }
 
-    this.renderView(container as HTMLElement);
+    this.renderView(container);
   }
 
-  /**
-   * Render the complete view
-   */
   private renderView(container: HTMLElement): void {
-    // Header with copy button
-    const header = container.createEl('div', { cls: 'semantic-ai-header' });
-    const headerRow = header.createEl('div', { cls: 'semantic-ai-header-row' });
-    headerRow.createEl('h4', { text: `Semantic Map: ${this.currentFilePath.split('/').pop()}` });
+    const header = container.createDiv({ cls: 'semantic-ai-header' });
+    const headerRow = header.createDiv({ cls: 'semantic-ai-header-row' });
 
-    // Copy All button
+    headerRow.createEl('h3', {
+      text: this.currentFilePath.split('/').pop() || 'Semantic map'
+    });
+
     const copyBtn = headerRow.createEl('button', {
       cls: 'semantic-ai-copy-btn',
-      text: '📋 Copy All'
+      text: 'Copy'
     });
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('aria-label', 'Copy the map and diagram source to the clipboard');
     copyBtn.addEventListener('click', () => this.copyAllContent());
 
-    // Summary
-    const summary = container.createEl('div', { cls: 'semantic-ai-summary' });
-    this.renderSummary(summary);
-
-    // Mermaid diagram
-    const diagramContainer = container.createEl('div', { cls: 'semantic-ai-diagram' });
-    this.renderMermaid(diagramContainer);
-
-    // Tag list
-    const tagList = container.createEl('div', { cls: 'semantic-ai-tag-list' });
-    this.renderTagList(tagList);
+    this.renderSummary(container.createDiv({ cls: 'semantic-ai-summary' }));
+    this.renderMermaid(container.createDiv({ cls: 'semantic-ai-diagram' }));
+    this.renderTagList(container.createDiv({ cls: 'semantic-ai-tag-list' }));
   }
 
-  /**
-   * Copy all content to clipboard
-   */
   private async copyAllContent(): Promise<void> {
-    const fileName = this.currentFilePath.split('/').pop() || 'Unknown';
+    const fileName = this.currentFilePath.split('/').pop() || 'note';
 
-    // Build tag summary
-    const counts: Record<string, number> = {};
-    for (const tag of this.currentTags) {
-      const key = tag.customType || tag.type;
-      counts[key] = (counts[key] || 0) + 1;
-    }
-
+    const counts = this.countByType();
     const summaryLines = Object.entries(counts)
-      .map(([type, count]) => `  ${type}: ${count}`)
+      .map(([type, count]) => `  ${categoryName(this.settings, type)}: ${count}`)
       .join('\n');
 
-    // Build tag details
     const tagDetails = this.currentTags
       .map(tag => `- [${tag.type}] ${tag.label} (${tag.uuid.slice(0, 8)})`)
       .join('\n');
 
-    // Get Mermaid code
-    const mermaidCode = this.generateMermaid();
-
-    // Build full output
-    const output = `# Semantic Map: ${fileName}
+    const output = `# Semantic map: ${fileName}
 
 ## Summary
 ${summaryLines}
 
-## Tags (${this.currentTags.length} total)
+## Tags (${this.currentTags.length})
 ${tagDetails}
 
-## Mermaid Diagram
+## Diagram
 \`\`\`mermaid
-${mermaidCode}
+${this.generateMermaid()}
 \`\`\`
 `;
 
     try {
       await navigator.clipboard.writeText(output);
-      new Notice('Copied to clipboard!');
-    } catch (error) {
-      new Notice('Failed to copy to clipboard');
-      console.error('Copy failed:', error);
+      new Notice('Copied to the clipboard.');
+    } catch {
+      new Notice('Could not write to the clipboard.');
     }
   }
 
-  /**
-   * Render summary of tags
-   */
-  private renderSummary(container: HTMLElement): void {
+  private countByType(): Record<string, number> {
     const counts: Record<string, number> = {};
 
     for (const tag of this.currentTags) {
@@ -167,47 +198,48 @@ ${mermaidCode}
       counts[key] = (counts[key] || 0) + 1;
     }
 
-    const summaryList = container.createEl('div', { cls: 'semantic-ai-summary-grid' });
+    return counts;
+  }
 
-    for (const [type, count] of Object.entries(counts)) {
-      const item = summaryList.createEl('div', { cls: 'semantic-ai-summary-item' });
-      item.createEl('span', { cls: 'semantic-ai-count', text: String(count) });
-      item.createEl('span', { cls: 'semantic-ai-type', text: type });
+  private renderSummary(container: HTMLElement): void {
+    const grid = container.createDiv({ cls: 'semantic-ai-summary-grid' });
+
+    for (const [type, count] of Object.entries(this.countByType())) {
+      const item = grid.createDiv({ cls: 'semantic-ai-summary-item' });
+      item.dataset.color = String(categoryColor(this.settings, type));
+      item.createSpan({ cls: 'semantic-ai-count', text: String(count) });
+      item.createSpan({ cls: 'semantic-ai-type', text: categoryName(this.settings, type) });
     }
   }
 
-  /**
-   * Render Mermaid diagram
-   */
   private renderMermaid(container: HTMLElement): void {
     const mermaidCode = this.generateMermaid();
 
-    // Create a code block for Mermaid rendering
     const pre = container.createEl('pre', { cls: 'mermaid' });
-    pre.textContent = mermaidCode;
+    pre.setText(mermaidCode);
 
-    // Also show raw code toggle
-    const toggleBtn = container.createEl('button', {
-      cls: 'semantic-ai-toggle-code',
-      text: 'Show Code'
-    });
-
-    const codeBlock = container.createEl('pre', {
-      cls: 'semantic-ai-code hidden'
-    });
+    const codeBlock = container.createEl('pre', { cls: 'semantic-ai-code hidden' });
     codeBlock.createEl('code', { text: mermaidCode });
 
-    toggleBtn.onclick = () => {
-      codeBlock.classList.toggle('hidden');
-      toggleBtn.textContent = codeBlock.classList.contains('hidden') ? 'Show Code' : 'Hide Code';
-    };
+    const toggleBtn = container.createEl('button', {
+      cls: 'semantic-ai-toggle-code',
+      text: 'Show source'
+    });
+    toggleBtn.type = 'button';
+    toggleBtn.setAttribute('aria-expanded', 'false');
+    toggleBtn.setAttribute('aria-controls', 'semantic-ai-mermaid-source');
+    codeBlock.id = 'semantic-ai-mermaid-source';
+
+    toggleBtn.addEventListener('click', () => {
+      const hidden = codeBlock.hasClass('hidden');
+      codeBlock.toggleClass('hidden', !hidden);
+      toggleBtn.setText(hidden ? 'Hide source' : 'Show source');
+      toggleBtn.setAttribute('aria-expanded', String(hidden));
+    });
   }
 
-  /**
-   * Render tag list with hierarchy
-   */
   private renderTagList(container: HTMLElement): void {
-    container.createEl('h5', { text: 'Tag Details' });
+    container.createEl('h4', { text: 'Tags' });
 
     const hierarchy = buildTagHierarchy(this.currentTags);
     const rootTags = hierarchy.get('root') || [];
@@ -216,181 +248,37 @@ ${mermaidCode}
     this.renderTagLevel(list, rootTags, hierarchy);
   }
 
-  /**
-   * Recursively render tag hierarchy
-   */
   private renderTagLevel(
     container: HTMLElement,
     tags: SemanticTag[],
     hierarchy: Map<string, SemanticTag[]>
   ): void {
     for (const tag of tags) {
-      const item = container.createEl('li', { cls: `semantic-ai-tag-item tag-${tag.type.toLowerCase()}` });
+      const item = container.createEl('li', { cls: 'semantic-ai-tag-item' });
 
-      const badge = item.createEl('span', {
+      const badge = item.createSpan({
         cls: 'semantic-ai-tag-badge',
-        text: tag.type
+        text: categoryName(this.settings, tag.customType || tag.type)
       });
-      badge.setAttribute('data-type', tag.type);
+      badge.dataset.color = String(categoryColor(this.settings, tag.type));
 
-      item.createEl('span', {
-        cls: 'semantic-ai-tag-label',
-        text: tag.label
-      });
+      item.createSpan({ cls: 'semantic-ai-tag-label', text: tag.label });
 
-      item.createEl('span', {
-        cls: 'semantic-ai-tag-uuid',
-        text: tag.uuid.slice(0, 8)
-      });
+      if (tag.topics?.length) {
+        item.createSpan({ cls: 'semantic-ai-tag-topics', text: tag.topics.join(', ') });
+      }
 
-      // Render children
+      item.createSpan({ cls: 'semantic-ai-tag-uuid', text: tag.uuid.slice(0, 8) });
+
       const children = hierarchy.get(tag.uuid);
       if (children && children.length > 0) {
-        const childList = item.createEl('ul');
-        this.renderTagLevel(childList, children, hierarchy);
+        this.renderTagLevel(item.createEl('ul'), children, hierarchy);
       }
     }
   }
 
-  /**
-   * Generate Mermaid diagram code
-   */
   generateMermaid(): string {
-    const direction = this.settings.graphDirection || 'TD';
-    const lines: string[] = [`graph ${direction}`];
-
-    // Create node definitions
-    const nodeIds = new Map<string, string>();
-
-    this.currentTags.forEach((tag, index) => {
-      const nodeId = `n${index}`;
-      nodeIds.set(tag.uuid, nodeId);
-
-      const label = this.escapeLabel(tag.label);
-      const shape = this.getShapeForType(tag.type);
-
-      lines.push(`  ${nodeId}${shape.open}"${tag.type}: ${label}"${shape.close}`);
-    });
-
-    // Create edges based on parent relationships
-    for (const tag of this.currentTags) {
-      if (tag.parentUuid && nodeIds.has(tag.parentUuid)) {
-        const parentId = nodeIds.get(tag.parentUuid);
-        const childId = nodeIds.get(tag.uuid);
-        lines.push(`  ${parentId} --> ${childId}`);
-      }
-    }
-
-    // Create relationship edges between related types
-    const axioms = this.currentTags.filter(t => t.type === 'Axiom');
-    const claims = this.currentTags.filter(t => t.type === 'Claim');
-    const evidence = this.currentTags.filter(t => t.type === 'EvidenceBundle');
-
-    // Connect axioms to claims (if no explicit parent)
-    for (const claim of claims) {
-      if (!claim.parentUuid && axioms.length > 0) {
-        const axiomId = nodeIds.get(axioms[0].uuid);
-        const claimId = nodeIds.get(claim.uuid);
-        if (axiomId && claimId) {
-          lines.push(`  ${axiomId} -.-> ${claimId}`);
-        }
-      }
-    }
-
-    // Connect evidence to claims (if no explicit parent)
-    for (const ev of evidence) {
-      if (!ev.parentUuid && claims.length > 0) {
-        const claimId = nodeIds.get(claims[0].uuid);
-        const evId = nodeIds.get(ev.uuid);
-        if (claimId && evId) {
-          lines.push(`  ${claimId} -.-> ${evId}`);
-        }
-      }
-    }
-
-    // Add styling
-    lines.push('');
-    lines.push('  %% Styling');
-    lines.push('  classDef axiom fill:#e1f5fe,stroke:#01579b');
-    lines.push('  classDef claim fill:#fff3e0,stroke:#e65100');
-    lines.push('  classDef evidence fill:#e8f5e9,stroke:#1b5e20');
-    lines.push('  classDef relationship fill:#f3e5f5,stroke:#4a148c');
-    lines.push('  classDef process fill:#fce4ec,stroke:#880e4f');
-    lines.push('  classDef link fill:#e0f7fa,stroke:#006064');
-    lines.push('  classDef name fill:#fff8e1,stroke:#ff6f00');
-    lines.push('  classDef ontology fill:#efebe9,stroke:#3e2723');
-
-    // Apply classes
-    for (const tag of this.currentTags) {
-      const nodeId = nodeIds.get(tag.uuid);
-      const className = this.getClassForType(tag.type);
-      if (nodeId && className) {
-        lines.push(`  class ${nodeId} ${className}`);
-      }
-    }
-
-    return lines.join('\n');
-  }
-
-  /**
-   * Get Mermaid shape for tag type
-   */
-  private getShapeForType(type: TagType): { open: string; close: string } {
-    switch (type) {
-      case 'Axiom':
-        return { open: '([', close: '])' }; // Stadium shape
-      case 'Claim':
-        return { open: '[', close: ']' }; // Rectangle
-      case 'EvidenceBundle':
-        return { open: '[(', close: ')]' }; // Cylinder
-      case 'ScientificProcess':
-        return { open: '{{', close: '}}' }; // Hexagon
-      case 'Relationship':
-        return { open: '>', close: ']' }; // Asymmetric
-      case 'InternalLink':
-      case 'ExternalLink':
-      case 'ForwardLink':
-        return { open: '((', close: '))' }; // Circle
-      case 'ProperName':
-        return { open: '[[', close: ']]' }; // Subroutine
-      case 'WordOntology':
-        return { open: '{', close: '}' }; // Rhombus
-      default:
-        return { open: '[', close: ']' };
-    }
-  }
-
-  /**
-   * Get CSS class for tag type
-   */
-  private getClassForType(type: TagType): string {
-    const classMap: Partial<Record<TagType, string>> = {
-      Axiom: 'axiom',
-      Claim: 'claim',
-      EvidenceBundle: 'evidence',
-      Relationship: 'relationship',
-      ScientificProcess: 'process',
-      InternalLink: 'link',
-      ExternalLink: 'link',
-      ForwardLink: 'link',
-      ProperName: 'name',
-      WordOntology: 'ontology'
-    };
-
-    return classMap[type] || '';
-  }
-
-  /**
-   * Escape label for Mermaid
-   */
-  private escapeLabel(label: string): string {
-    return label
-      .replace(/"/g, "'")
-      .replace(/\[/g, '(')
-      .replace(/\]/g, ')')
-      .replace(/\{/g, '(')
-      .replace(/\}/g, ')')
-      .slice(0, 50) + (label.length > 50 ? '...' : '');
+    return buildMermaid(this.currentTags, this.settings.graphDirection || 'TD', this.settings);
   }
 
   async onOpen(): Promise<void> {
@@ -398,64 +286,33 @@ ${mermaidCode}
   }
 
   async onClose(): Promise<void> {
-    // Cleanup if needed
+    this.currentTags = [];
   }
 }
 
 /**
- * Generate Mermaid code string (utility function for embedding in notes)
+ * Wrap the graph in a fenced block ready to paste into a note.
+ * Returns an empty string when there is nothing to draw.
  */
-export function generateMermaidForNote(
+export function createMermaidCodeBlock(
   tags: SemanticTag[],
-  direction: 'TD' | 'LR' | 'BT' | 'RL' = 'TD'
+  direction?: 'TD' | 'LR' | 'BT' | 'RL',
+  settings?: SemanticAISettings
 ): string {
-  if (tags.length === 0) {
-    return '';
-  }
-
-  const tempView = {
-    settings: { graphDirection: direction },
-    currentTags: tags,
-    escapeLabel: (label: string) => label
-      .replace(/"/g, "'")
-      .replace(/\[/g, '(')
-      .replace(/\]/g, ')')
-      .slice(0, 50),
-    getShapeForType: (type: TagType) => ({ open: '[', close: ']' }),
-    getClassForType: () => ''
-  };
-
-  // Build the mermaid graph
-  const lines: string[] = [`graph ${direction}`];
-  const nodeIds = new Map<string, string>();
-
-  tags.forEach((tag, index) => {
-    const nodeId = `n${index}`;
-    nodeIds.set(tag.uuid, nodeId);
-    const label = tempView.escapeLabel(tag.label);
-    lines.push(`  ${nodeId}["${tag.type}: ${label}"]`);
-  });
-
-  for (const tag of tags) {
-    if (tag.parentUuid && nodeIds.has(tag.parentUuid)) {
-      const parentId = nodeIds.get(tag.parentUuid);
-      const childId = nodeIds.get(tag.uuid);
-      lines.push(`  ${parentId} --> ${childId}`);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-/**
- * Create Mermaid code block for embedding in notes
- */
-export function createMermaidCodeBlock(tags: SemanticTag[], direction?: 'TD' | 'LR' | 'BT' | 'RL'): string {
-  const mermaidCode = generateMermaidForNote(tags, direction);
+  const mermaidCode = buildMermaid(tags, direction, settings);
 
   if (!mermaidCode) {
     return '';
   }
 
   return `\n\n\`\`\`mermaid\n${mermaidCode}\n\`\`\`\n`;
+}
+
+/** Kept for callers that only need the source. */
+export function generateMermaidForNote(
+  tags: SemanticTag[],
+  direction: 'TD' | 'LR' | 'BT' | 'RL' = 'TD',
+  settings?: SemanticAISettings
+): string {
+  return buildMermaid(tags, direction, settings);
 }

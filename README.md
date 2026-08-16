@@ -1,248 +1,156 @@
-# Obsidian Semantic AI Plugin
+# Semantic AI
 
-An AI-enhanced semantic plugin for Obsidian that enables academic-level tagging, visual flow graphs, and metadata management — all embedded in the note and driven by native AI.
+An Obsidian plugin that reads a note, classifies what is in it against **categories you define**, and writes the results back as hidden, UUID-stamped tags you can browse, index, and graph.
 
-## Features
+Nothing about the categories is baked in. Ship it at a research vault and it finds axioms and evidence; point it at meeting notes and it finds decisions and action items; point it at a novel draft and it finds scenes and plot points. You pick a preset, then edit it, or start from a blank slate.
 
-### Core Functionality
+## Two axes
 
-- **Inline Tagging with Hidden Structure** - AI-generated classifications are stored as hidden metadata with UUIDs
-- **Native AI Classification** - Classify notes using OpenAI, Anthropic, Ollama, or custom API endpoints
-- **Custom Prompts** - Fully editable prompts for every classification type
-- **Batch Processing** - Classify entire folders with token cost estimates
-- **Visual Graphs** - Auto-generated Mermaid.js diagrams showing semantic relationships
-- **Multi-layer Tag System** - Support for note → paragraph → sentence → term hierarchy
-- **Postgres Sync Ready** - UUID-based tagging for future database integration
+Every element gets labelled twice:
 
-### Supported Tag Types
+| Axis | Question | Example values |
+|------|----------|----------------|
+| **Category** | What is this? | Idea, Decision, Task · Axiom, Claim, Theorem · Character, Scene, Motif |
+| **Topic** | Where does it belong? | Work, Personal, Finance · Physics, Theology · Plot, Voice, Pacing |
 
-| Tag Type | Description |
-|----------|-------------|
-| Axiom | Core foundational truths that don't rely on prior proof |
-| Claim | Assertions that can be supported or refuted |
-| Evidence Bundle | Empirical data, quotes, or logical arguments |
-| Scientific Process | Methodologies and experimental procedures |
-| Relationship | Connections between concepts, entities, or events |
-| Internal Link | References to other notes or sections |
-| External Link | References to external sources or citations |
-| Proper Name | People, places, organizations |
-| Forward Link | Topics for future exploration |
-| Word Ontology | Specialized terms with definitions |
-| Sentence | Key sentences with important content |
-| Paragraph | Logical units of thought |
-| Custom | User-defined categories |
+The second axis is optional and you choose what it is called — topic, domain, department, thread, whatever fits your vault.
 
-### Tag Format
+## Presets
 
-Tags are stored at the bottom of notes in this format:
+Load one from **Settings → Semantic AI → Categories**, then edit anything in it.
 
-```
-%%tag::TYPE::UUID::"Label"::parent_UUID%%
-```
+| Preset | For |
+|--------|-----|
+| General notes | Ideas, questions, decisions, tasks, facts, quotes, people, terms, sources, insights |
+| Research and academic | Axioms, claims, hypotheses, definitions, theories, observations, laws, theorems, lemmas, evidence |
+| Projects and meetings | Requirements, decisions, action items, risks, assumptions, dependencies, metrics, stakeholders |
+| Fiction and long-form writing | Characters, settings, scenes, plot points, themes, conflicts, motifs, revision notes |
+| Blank | One starter category; build your own |
 
-Example:
+Each category carries its own prompt — the sentence the model is given when looking for it. Rewrite it in the same tab.
+
+You can export the whole taxonomy as JSON and import it into another vault.
+
+## AI providers
+
+Keys are stored **per provider**, so an OpenAI key and a DeepSeek key can sit side by side and switching between them keeps both.
+
+| Provider | Default model | Key needed |
+|----------|---------------|------------|
+| OpenAI | `gpt-4o-mini` | Yes — [platform.openai.com](https://platform.openai.com/api-keys) |
+| DeepSeek | `deepseek-chat` | Yes — [platform.deepseek.com](https://platform.deepseek.com/api_keys) |
+| Anthropic | `claude-3-5-haiku-latest` | Yes — [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| Ollama | `llama3.1` | No — runs locally |
+| Custom endpoint | whatever you set | Optional |
+
+Keys are saved in this vault's plugin data (`data.json`) in plain text, the same as every other Obsidian plugin that talks to an API. Do not commit that file or sync it somewhere public.
+
+Cost estimates shown before a batch run use published list prices and are approximate.
+
+## Tag format
+
+Tags live in a block at the bottom of the note:
+
 ```
 %%--- SEMANTIC TAGS ---%%
-%%tag::Axiom::a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d::"Conservation of Energy"::null%%
-%%tag::Claim::b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e::"Renewable energy is sustainable"::a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d%%
+%%tag::Decision::a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d::"Move the launch to Q3"::null::@Work,Product%%
+%%tag::Risk::b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e::"Vendor contract is unsigned"::a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d%%
 %%--- END SEMANTIC TAGS ---%%
 ```
 
+The parts are `type`, `uuid`, `label`, `parent uuid`, and an optional `::@topics` segment. The category id is whatever you named it, so a tag written last year still reads correctly after you rename the category's display name — only changing the **id** orphans old tags.
+
+The same concept keeps the same UUID across notes, via a registry stored in the plugin's own folder.
+
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| Classify current note | Runs every enabled category |
+| Classify current note, choosing categories | Pick categories for this one run |
+| Classify as: *category* | One command per category you define |
+| Run classifier: *keyword* | One command per custom classifier |
+| Toggle tag block visibility | Show or hide the tag block |
+| Open semantic map for current note | Diagram and tag list in the side panel |
+| Regenerate graph for current note | Rebuild the diagram |
+| Classify every note in the current folder | Batch run, with a cost estimate first |
+| Index the current folder / whole vault | Build the concept index (no AI calls, no cost) |
+| Open concept tracker | Browse concepts, relations, and search |
+| Open concept journey | Trace how one concept develops across notes |
+
+Category commands are registered when the plugin loads, so after adding or renaming a category, reload the plugin to see the new command.
+
+No hotkeys are assigned by default — set your own in Obsidian's hotkey settings.
+
 ## Installation
 
-### Quick Install (Windows)
+### From source
 
-1. Clone this repository into your vault's `.obsidian/plugins/obsidian-semantic-ai` folder
-2. Double-click **`install.bat`** - it handles everything automatically
-3. Restart Obsidian and enable the plugin
+```bash
+git clone <this repo> <vault>/.obsidian/plugins/semantic-ai
+cd <vault>/.obsidian/plugins/semantic-ai
+npm install
+npm run build
+```
 
-### From Source (Manual)
+Then enable it in Settings → Community plugins.
 
-1. Clone this repository into your vault's `.obsidian/plugins/` folder
-2. Run `npm install` to install dependencies
-3. Run `npm run build` to compile the plugin
-4. Enable the plugin in Obsidian Settings → Community Plugins
-
-### Helper Scripts (Windows)
-
-| Script | Description |
-|--------|-------------|
-| `install.bat` | One-click installer - installs dependencies and builds the plugin |
-| `troubleshoot.bat` | Interactive troubleshooting menu with options to clean reinstall, rebuild, update packages, fix vulnerabilities, and more |
+On Windows, `install.bat` does the same thing in one click, and `troubleshoot.bat` offers a clean reinstall and rebuild.
 
 ### Development
 
 ```bash
-# Install dependencies
-npm install
-
-# Build for production
-npm run build
-
-# Watch for changes during development
-npm run dev
+npm run dev     # rebuild on change
+npm run build   # typecheck and build for release
+npm run lint    # eslint
 ```
 
-## Configuration
+## Upgrading from 1.x
 
-### AI Provider Setup
+Existing settings are migrated on first load:
 
-1. Open Settings → Semantic AI → AI Settings
-2. Select your AI provider:
-   - **OpenAI**: Requires API key, uses GPT models
-   - **Anthropic**: Requires API key, uses Claude models
-   - **Ollama**: Free, local inference (no API key needed)
-   - **Custom**: Any OpenAI-compatible API
+- The old fixed category list becomes the **Research and academic** preset, with any prompt edits preserved.
+- The single API key moves to the slot for whichever provider it belonged to.
+- Domain mapping becomes the topics axis, keeping your custom domain prompt.
 
-3. Enter your API key (if required)
-4. Select your preferred model
-5. Click "Test" to verify connection
+Two things do change and need a look:
 
-### Recommended Models
+- The plugin **id** changed from `obsidian-semantic-ai` to `semantic-ai` (the community-plugin bot rejects ids containing "obsidian"). Obsidian treats that as a different plugin, so install to the new folder name and enable it again.
+- The concept registry now lives in the plugin's own folder and is read through the vault adapter. The old path was inside `.obsidian`, which is not part of the vault file tree, so it never actually persisted; the registry rebuilds itself as you classify.
 
-| Provider | Model | Speed | Cost |
-|----------|-------|-------|------|
-| OpenAI | gpt-4o-mini | Fast | $0.15/1M tokens |
-| OpenAI | gpt-4o | Moderate | $2.50/1M tokens |
-| Anthropic | claude-3-haiku | Fast | $0.25/1M tokens |
-| Anthropic | claude-3-sonnet | Moderate | $3.00/1M tokens |
-| Ollama | llama2 | Varies | Free |
-
-## Usage
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `Run AI Classifier` | Classify current note with default types |
-| `Run AI Classifier (Select Types)` | Choose which tag types to identify |
-| `Classify as: Axiom/Claim/Evidence` | Classify for a specific type only |
-| `Toggle Hidden Tags Visibility` | Show/hide tag blocks in notes |
-| `Open Semantic Map` | Open the Mermaid diagram panel |
-| `Regenerate Semantic Graph` | Rebuild the graph for current note |
-| `Batch Classify Folder` | Process all notes in a folder |
-
-### Right-Click Menu
-
-**On Notes:**
-- Run AI Classifier
-- Open Semantic Map
-- Show Hidden Tags
-- Classify as...
-
-**On Folders:**
-- Batch Classify This Folder
-
-### Prompt Editing
-
-1. Go to Settings → Semantic AI → Prompt Editor
-2. Select a tag type tab (Axioms, Claims, Evidence, etc.)
-3. Edit the prompt text
-4. Click "Reset" to restore defaults
-
-### Custom Classifiers
-
-Create your own semantic categories:
-
-1. Go to Settings → Semantic AI → Custom Classifiers
-2. Enter a keyword (e.g., "hypothesis")
-3. Write a custom prompt
-4. Click "Add Classifier"
-
-Use via command: `Run AI Classifier (Select Types)` and select your custom type.
-
-## Visual Graphs
-
-The plugin generates Mermaid.js diagrams showing semantic relationships:
-
-```mermaid
-graph TD
-  ax1(["Axiom: Light is constant"])
-  cl1["Claim: Time dilates"]
-  ev1[("Evidence: Hafele-Keating")]
-  ax1 --> cl1 --> ev1
-```
-
-Configure in Settings → Semantic AI → Graph Settings:
-- **Direction**: Top-down, Left-right, etc.
-- **Theme**: Default, Forest, Dark, Neutral
-- **Position**: Side panel or appended to note
-
-## Project Structure
+## Project structure
 
 ```
 src/
   ai/
-    classifier.ts       # AI classification logic
-    prompt-manager.ts   # Prompt management
+    classifier.ts       provider transport and response parsing
+    prompt-manager.ts   prompt construction, taxonomy import/export
+  indexing/
+    vault-indexer.ts    cross-note concept index
   tagging/
-    tag-writer.ts       # Tag CRUD operations
-    uuid-generator.ts   # UUID generation
+    tag-writer.ts       read, write, and parse tag blocks
+    concept-registry.ts stable UUIDs per concept
+    uuid-generator.ts
   ui/
-    mermaid-view.ts     # Graph visualization
-    result-panel.ts     # Result modals
-    prompt-tabs.ts      # Settings UI components
-  main.ts               # Plugin entry point
-  settings.ts           # Settings tab
-  types.ts              # TypeScript interfaces
+    mermaid-view.ts     semantic map panel
+    concept-tracker-view.ts
+    concept-journey-view.ts
+    result-panel.ts     classification and batch modals
+    index-modal.ts      indexing modals
+    prompt-tabs.ts      custom classifier settings
+  main.ts               plugin entry point
+  settings.ts           settings tab
+  types.ts              types, presets, settings migration
 ```
 
-## Backend Sync (Phase 2)
+## Database sync
 
-The plugin is designed for future integration with:
-- PostgreSQL database
-- Python sync service
-
-All tags include UUIDs that serve as global identifiers for cross-platform syncing.
-
-To enable (when implemented):
-1. Settings → Semantic AI → Backend Sync
-2. Enter PostgreSQL connection string
-3. Enter Python service URL
-4. Test connection
-
-## API Reference
-
-### Tag Interface
-
-```typescript
-interface SemanticTag {
-  type: TagType;
-  uuid: string;
-  label: string;
-  parentUuid: string | null;
-  customType?: string;
-  metadata?: Record<string, unknown>;
-}
-```
-
-### Classification Result
-
-```typescript
-interface ClassificationResult {
-  tags: SemanticTag[];
-  mermaidGraph?: string;
-  summary?: string;
-}
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+Optional, and off by default. Tags carry UUIDs so they can be mirrored into PostgreSQL through a helper service you run yourself; the plugin never holds database credentials beyond passing the connection string to that local service.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Credits
 
-Inspired by [obsidian-note-definitions](https://github.com/dominiclet/obsidian-note-definitions)
-
----
-
-**Built with [Claude](https://claude.ai) (Anthropic) & TypeScript for Obsidian.**
-
-*This plugin was developed with assistance from Claude, Anthropic's AI assistant.*
+Inspired by [obsidian-note-definitions](https://github.com/dominiclet/obsidian-note-definitions).

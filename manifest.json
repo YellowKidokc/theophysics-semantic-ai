@@ -1,11 +1,10 @@
 {
-  "id": "obsidian-semantic-ai",
+  "id": "semantic-ai",
   "name": "Semantic AI",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "minAppVersion": "1.4.0",
-  "description": "AI-enhanced semantic plugin with academic-level tagging, visual flow graphs, and metadata management. Supports axioms, claims, evidence bundles, relationships, and more.",
+  "description": "Classify notes with an AI model against categories you define, then browse the results as tags, a concept index, and a graph.",
   "author": "YellowKidokc",
   "authorUrl": "https://github.com/YellowKidokc",
-  "fundingUrl": "",
   "isDesktopOnly": false
 }

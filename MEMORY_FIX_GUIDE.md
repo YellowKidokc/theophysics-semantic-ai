@@ -1,7 +1,7 @@
 # Obsidian Plugin Fix: AI-Semantic-Map Memory Issues
 
 ## Problem Summary
-The `obsidian-semantic-ai` plugin crashes Obsidian on large vaults (15,000+ files) due to O(n²) algorithms that weren't designed for scale.
+The `semantic-ai` plugin crashes Obsidian on large vaults (15,000+ files) due to O(n²) algorithms that weren't designed for scale.
 
 ## Root Causes Identified
 
@@ -76,7 +76,7 @@ npm run build
 ### Option B: Copy to vault plugins folder
 ```bash
 # After building, copy to:
-O:\Theophysics_Master\THEOPHYSICS\.obsidian\plugins\obsidian-semantic-ai\
+O:\Theophysics_Master\THEOPHYSICS\.obsidian\plugins\semantic-ai\
 ```
 
 ## Additional Recommendations

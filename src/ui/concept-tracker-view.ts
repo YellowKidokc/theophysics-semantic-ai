@@ -3,9 +3,9 @@
  * Displays cross-document concept index and relationships
  */
 
-import { ItemView, WorkspaceLeaf, TFolder, Menu } from 'obsidian';
+import { ItemView, WorkspaceLeaf } from 'obsidian';
 import { VaultIndex, ConceptEntry, CrossDocumentRelation } from '../indexing/vault-indexer';
-import { TagType } from '../types';
+import { SemanticAISettings, TagType, categoryColor, categoryName } from '../types';
 
 export const CONCEPT_TRACKER_VIEW_TYPE = 'semantic-ai-concept-tracker';
 
@@ -17,11 +17,29 @@ export class ConceptTrackerView extends ItemView {
   private currentView: 'overview' | 'concepts' | 'relations' | 'search' = 'overview';
   private searchQuery: string = '';
   private selectedType: TagType | 'all' = 'all';
+  private settings: SemanticAISettings;
   private onNavigateToFile: (filePath: string) => void;
 
-  constructor(leaf: WorkspaceLeaf, onNavigateToFile: (filePath: string) => void) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    settings: SemanticAISettings,
+    onNavigateToFile: (filePath: string) => void
+  ) {
     super(leaf);
+    this.settings = settings;
     this.onNavigateToFile = onNavigateToFile;
+  }
+
+  /** Open a note, from a click or an Enter/Space keypress. */
+  private createFileLink(container: HTMLElement, text: string, filePath: string): HTMLElement {
+    const link = container.createEl('button', {
+      cls: 'semantic-ai-file-link',
+      text
+    });
+    link.type = 'button';
+    link.setAttribute('aria-label', `Open ${text}`);
+    link.addEventListener('click', () => this.onNavigateToFile(filePath));
+    return link;
   }
 
   getViewType(): string {
@@ -29,7 +47,7 @@ export class ConceptTrackerView extends ItemView {
   }
 
   getDisplayText(): string {
-    return 'Concept Tracker';
+    return 'Concept tracker';
   }
 
   getIcon(): string {
@@ -64,13 +82,12 @@ export class ConceptTrackerView extends ItemView {
    */
   private renderEmptyState(container: HTMLElement): void {
     const empty = container.createEl('div', { cls: 'semantic-ai-empty-state' });
-    empty.createEl('h3', { text: 'No Index Built' });
-    empty.createEl('p', { text: 'Build an index to track concepts across your notes.' });
-    empty.createEl('p', { text: 'Use the command palette:' });
+    empty.createEl('h3', { text: 'No index yet' });
+    empty.createEl('p', { text: 'Build an index to track concepts across your notes. From the command palette:' });
 
     const commands = empty.createEl('ul');
-    commands.createEl('li', { text: '"Index Current Folder" - Index a specific folder' });
-    commands.createEl('li', { text: '"Index Entire Vault" - Index all notes (may be expensive)' });
+    commands.createEl('li', { text: 'Index the current folder' });
+    commands.createEl('li', { text: 'Index the whole vault' });
   }
 
   /**
@@ -105,24 +122,30 @@ export class ConceptTrackerView extends ItemView {
    */
   private renderTabs(container: HTMLElement): void {
     const tabs = container.createEl('div', { cls: 'semantic-ai-tracker-tabs' });
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', 'Concept tracker sections');
 
-    const tabItems: { id: 'overview' | 'concepts' | 'relations' | 'search'; label: string; icon: string }[] = [
-      { id: 'overview', label: 'Overview', icon: '📊' },
-      { id: 'concepts', label: 'Concepts', icon: '🏷️' },
-      { id: 'relations', label: 'Relations', icon: '🔗' },
-      { id: 'search', label: 'Search', icon: '🔍' }
+    const tabItems: { id: 'overview' | 'concepts' | 'relations' | 'search'; label: string }[] = [
+      { id: 'overview', label: 'Overview' },
+      { id: 'concepts', label: 'Concepts' },
+      { id: 'relations', label: 'Relations' },
+      { id: 'search', label: 'Search' }
     ];
 
     for (const tab of tabItems) {
+      const isActive = this.currentView === tab.id;
       const tabEl = tabs.createEl('button', {
-        cls: `semantic-ai-tracker-tab ${this.currentView === tab.id ? 'active' : ''}`,
-        text: `${tab.icon} ${tab.label}`
+        cls: `semantic-ai-tracker-tab${isActive ? ' active' : ''}`,
+        text: tab.label
       });
+      tabEl.type = 'button';
+      tabEl.setAttribute('role', 'tab');
+      tabEl.setAttribute('aria-selected', String(isActive));
 
-      tabEl.onclick = () => {
+      tabEl.addEventListener('click', () => {
         this.currentView = tab.id;
         this.refresh();
-      };
+      });
     }
   }
 
@@ -210,19 +233,28 @@ export class ConceptTrackerView extends ItemView {
     // Filter controls
     const controls = container.createEl('div', { cls: 'semantic-ai-tracker-controls' });
 
-    const typeFilter = controls.createEl('select', { cls: 'semantic-ai-type-filter' });
-    typeFilter.createEl('option', { value: 'all', text: 'All Types' });
+    const typeFilter = controls.createEl('select', { cls: 'semantic-ai-type-filter dropdown' });
+    typeFilter.setAttribute('aria-label', 'Filter concepts by category');
+    typeFilter.createEl('option', { value: 'all', text: 'All categories' });
 
-    const types: TagType[] = ['Axiom', 'Claim', 'EvidenceBundle', 'Relationship', 'ScientificProcess', 'ProperName', 'WordOntology'];
-    for (const type of types) {
-      typeFilter.createEl('option', { value: type, text: type });
+    // Categories come from settings, plus anything already in the index that
+    // the user has since removed, so nothing disappears from the filter.
+    const seen = new Set(this.settings.categories.map(c => c.id));
+    for (const concept of this.index.concepts.values()) {
+      for (const type of concept.tagTypes) {
+        seen.add(type);
+      }
+    }
+
+    for (const type of Array.from(seen)) {
+      typeFilter.createEl('option', { value: type, text: categoryName(this.settings, type) });
     }
 
     typeFilter.value = this.selectedType;
-    typeFilter.onchange = () => {
+    typeFilter.addEventListener('change', () => {
       this.selectedType = typeFilter.value as TagType | 'all';
       this.refresh();
-    };
+    });
 
     // Concept list
     let concepts = Array.from(this.index.concepts.values());
@@ -287,19 +319,25 @@ export class ConceptTrackerView extends ItemView {
     const searchBox = container.createEl('div', { cls: 'semantic-ai-search-box' });
 
     const input = searchBox.createEl('input', {
-      type: 'text',
-      placeholder: 'Search concepts...',
+      type: 'search',
+      placeholder: 'Search concepts',
       cls: 'semantic-ai-search-input'
     });
     input.value = this.searchQuery;
-
-    input.oninput = () => {
-      this.searchQuery = input.value;
-      this.renderSearchResults(resultsContainer);
-    };
+    input.setAttribute('aria-label', 'Search concepts');
+    input.setAttribute('aria-controls', 'semantic-ai-search-results');
 
     // Results
     const resultsContainer = container.createEl('div', { cls: 'semantic-ai-search-results scrollable' });
+    resultsContainer.id = 'semantic-ai-search-results';
+    resultsContainer.setAttribute('role', 'region');
+    resultsContainer.setAttribute('aria-live', 'polite');
+
+    input.addEventListener('input', () => {
+      this.searchQuery = input.value;
+      this.renderSearchResults(resultsContainer);
+    });
+
     this.renderSearchResults(resultsContainer);
   }
 
@@ -353,10 +391,11 @@ export class ConceptTrackerView extends ItemView {
     // Type badges
     const badges = header.createEl('div', { cls: 'semantic-ai-concept-badges' });
     for (const type of concept.tagTypes.slice(0, 3)) {
-      badges.createEl('span', {
-        cls: `semantic-ai-badge badge-${type.toLowerCase()}`,
-        text: type
+      const badge = badges.createEl('span', {
+        cls: 'semantic-ai-badge',
+        text: categoryName(this.settings, type)
       });
+      badge.dataset.color = String(categoryColor(this.settings, type));
     }
 
     // Label
@@ -379,14 +418,7 @@ export class ConceptTrackerView extends ItemView {
       for (const occ of concept.occurrences.slice(0, 20)) {
         const occItem = occList.createEl('li');
 
-        const link = occItem.createEl('a', {
-          cls: 'semantic-ai-file-link',
-          text: occ.fileName
-        });
-        link.onclick = (e) => {
-          e.preventDefault();
-          this.onNavigateToFile(occ.filePath);
-        };
+        this.createFileLink(occItem, occ.fileName, occ.filePath);
 
         occItem.createEl('span', {
           cls: 'semantic-ai-occ-type',
@@ -440,25 +472,19 @@ export class ConceptTrackerView extends ItemView {
     // Files
     const filesEl = item.createEl('div', { cls: 'semantic-ai-relation-files' });
 
-    const file1 = filesEl.createEl('a', {
-      cls: 'semantic-ai-file-link',
-      text: relation.sourceFile.split('/').pop()
-    });
-    file1.onclick = (e) => {
-      e.preventDefault();
-      this.onNavigateToFile(relation.sourceFile);
-    };
+    this.createFileLink(
+      filesEl,
+      relation.sourceFile.split('/').pop() || relation.sourceFile,
+      relation.sourceFile
+    );
 
-    filesEl.createEl('span', { text: ' ↔ ' });
+    filesEl.createSpan({ text: ' ↔ ' });
 
-    const file2 = filesEl.createEl('a', {
-      cls: 'semantic-ai-file-link',
-      text: relation.targetFile.split('/').pop()
-    });
-    file2.onclick = (e) => {
-      e.preventDefault();
-      this.onNavigateToFile(relation.targetFile);
-    };
+    this.createFileLink(
+      filesEl,
+      relation.targetFile.split('/').pop() || relation.targetFile,
+      relation.targetFile
+    );
 
     // Shared concepts
     if (showConcepts && relation.sharedConcepts.length > 0) {

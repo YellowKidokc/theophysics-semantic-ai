@@ -1,10 +1,10 @@
 /**
- * Obsidian Semantic AI Plugin
- * AI-enhanced semantic plugin with academic-level tagging, visual flow graphs, and metadata management
+ * Semantic AI
+ * Classifies notes against a taxonomy you define, writes the results back as
+ * UUID-stamped tags, and draws the result as a graph.
  */
 
 import {
-  App,
   Plugin,
   TFile,
   TFolder,
@@ -17,11 +17,10 @@ import {
 
 import {
   SemanticAISettings,
-  DEFAULT_SETTINGS,
   TagType,
   SemanticTag,
-  ClassificationResult,
-  CKG_TYPES
+  enabledCategoryIds,
+  migrateSettings
 } from './types';
 
 import { SemanticAISettingTab } from './settings';
@@ -30,10 +29,6 @@ import { AIClassifier, BatchClassifier } from './ai/classifier';
 import {
   writeTags,
   readTags,
-  parseTags,
-  hasTagBlock,
-  getContentWithTagVisibility,
-  getTagCounts,
   setConceptRegistry
 } from './tagging/tag-writer';
 import { ConceptRegistry } from './tagging/concept-registry';
@@ -57,6 +52,8 @@ import {
   FolderSelectionModal
 } from './ui/index-modal';
 
+const TAG_BLOCK_END = '%%--- END SEMANTIC TAGS ---%%';
+
 export default class SemanticAIPlugin extends Plugin {
   settings: SemanticAISettings;
   promptManager: PromptManager;
@@ -65,241 +62,199 @@ export default class SemanticAIPlugin extends Plugin {
   conceptRegistry: ConceptRegistry;
 
   async onload(): Promise<void> {
-    console.log('Loading Semantic AI plugin');
-
-    // Load settings
     await this.loadSettings();
 
-    // Initialize managers
     this.promptManager = new PromptManager(this.settings);
     this.classifier = new AIClassifier(this.settings, this.promptManager);
     this.vaultIndexer = new VaultIndexer(this.app.vault);
 
-    // Initialize concept registry for consistent UUIDs
-    this.conceptRegistry = new ConceptRegistry(this.app.vault);
+    // Shared registry so the same concept keeps the same UUID across notes.
+    this.conceptRegistry = new ConceptRegistry(this.app.vault, this.manifest.dir);
     await this.conceptRegistry.load();
     setConceptRegistry(this.conceptRegistry);
 
-    // Register views
     this.registerView(
       MERMAID_VIEW_TYPE,
-      (leaf) => new MermaidView(leaf, this.settings)
+      (leaf: WorkspaceLeaf) => new MermaidView(leaf, this.settings)
     );
 
     this.registerView(
       CONCEPT_TRACKER_VIEW_TYPE,
-      (leaf) => new ConceptTrackerView(leaf, (filePath) => {
-        const file = this.app.vault.getAbstractFileByPath(filePath);
-        if (file instanceof TFile) {
-          this.app.workspace.getLeaf().openFile(file);
-        }
+      (leaf: WorkspaceLeaf) => new ConceptTrackerView(leaf, this.settings, (filePath) => {
+        this.openFileByPath(filePath);
       })
     );
 
     this.registerView(
       CONCEPT_JOURNEY_VIEW_TYPE,
-      (leaf) => new ConceptJourneyView(leaf)
+      (leaf: WorkspaceLeaf) => new ConceptJourneyView(leaf)
     );
 
-    // Add settings tab
     this.addSettingTab(new SemanticAISettingTab(this.app, this));
 
-    // Add ribbon icon
     this.addRibbonIcon('brain', 'Semantic AI', (evt: MouseEvent) => {
       this.showSemanticMenu(evt);
     });
 
-    // Register commands
     this.registerCommands();
-
-    // Register context menu
     this.registerContextMenu();
-
-    // Register event handlers
-    this.registerEventHandlers();
   }
 
   async onunload(): Promise<void> {
-    console.log('Unloading Semantic AI plugin');
-
-    // Save concept registry if it has changes
-    if (this.conceptRegistry && this.conceptRegistry.isDirty()) {
+    if (this.conceptRegistry?.isDirty()) {
       await this.conceptRegistry.save();
     }
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = migrateSettings(await this.loadData());
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
 
-    // Update managers with new settings
-    if (this.promptManager) {
-      this.promptManager.updateSettings(this.settings);
-    }
-    if (this.classifier) {
-      this.classifier.updateSettings(this.settings);
+    this.promptManager?.updateSettings(this.settings);
+    this.classifier?.updateSettings(this.settings);
+
+    for (const leaf of this.app.workspace.getLeavesOfType(MERMAID_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof MermaidView) {
+        view.updateSettings(this.settings);
+      }
     }
   }
 
-  /**
-   * Register all plugin commands
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Commands                                                               */
+  /* ---------------------------------------------------------------------- */
+
   private registerCommands(): void {
-    // Run AI Classifier
     this.addCommand({
-      id: 'run-ai-classifier',
-      name: 'Run AI Classifier',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
+      id: 'classify-note',
+      name: 'Classify current note',
+      editorCallback: async (_editor: Editor, view: MarkdownView) => {
         await this.runClassifier(view.file);
       }
     });
 
-    // Run classifier with type selection
     this.addCommand({
-      id: 'run-ai-classifier-select',
-      name: 'Run AI Classifier (Select Types)',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
+      id: 'classify-note-choose-categories',
+      name: 'Classify current note, choosing categories',
+      editorCallback: async (_editor: Editor, view: MarkdownView) => {
         await this.runClassifierWithSelection(view.file);
       }
     });
 
-    // Classify as specific type
-    this.addCommand({
-      id: 'classify-as-axiom',
-      name: 'Classify as: Axiom',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
-        await this.classifyAs(view.file, 'Axiom');
-      }
-    });
+    // One command per category, so any taxonomy gets its own shortcuts.
+    // Registered from saved settings at load time; changing categories takes
+    // effect after Obsidian reloads the plugin.
+    for (const category of this.settings.categories) {
+      this.addCommand({
+        id: `classify-as-${category.id.toLowerCase()}`,
+        name: `Classify as: ${category.name.toLowerCase()}`,
+        editorCallback: async (_editor: Editor, view: MarkdownView) => {
+          await this.classifyAs(view.file, category.id);
+        }
+      });
+    }
+
+    for (const classifier of this.settings.customClassifiers) {
+      this.addCommand({
+        id: `run-classifier-${classifier.id}`,
+        name: `Run classifier: ${classifier.keyword}`,
+        editorCallback: async (_editor: Editor, view: MarkdownView) => {
+          await this.runCustomClassifier(view.file, classifier.keyword);
+        }
+      });
+    }
 
     this.addCommand({
-      id: 'classify-as-claim',
-      name: 'Classify as: Claim',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
-        await this.classifyAs(view.file, 'Claim');
-      }
-    });
-
-    this.addCommand({
-      id: 'classify-as-evidence',
-      name: 'Classify as: Evidence',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
-        await this.classifyAs(view.file, 'EvidenceBundle');
-      }
-    });
-
-    // Show/Hide Hidden Tags
-    this.addCommand({
-      id: 'toggle-hidden-tags',
-      name: 'Toggle Hidden Tags Visibility',
-      callback: () => {
+      id: 'toggle-tag-visibility',
+      name: 'Toggle tag block visibility',
+      callback: async () => {
         this.settings.showHiddenTags = !this.settings.showHiddenTags;
-        this.saveSettings();
-        new Notice(`Hidden tags ${this.settings.showHiddenTags ? 'shown' : 'hidden'}`);
+        await this.saveSettings();
+        new Notice(this.settings.showHiddenTags ? 'Tag blocks shown' : 'Tag blocks hidden');
       }
     });
 
-    this.addCommand({
-      id: 'show-hidden-tags',
-      name: 'Show All Hidden Tags',
-      callback: () => {
-        this.settings.showHiddenTags = true;
-        this.saveSettings();
-        new Notice('Hidden tags now visible');
-      }
-    });
-
-    // Open Semantic Map
     this.addCommand({
       id: 'open-semantic-map',
-      name: 'Open Semantic Map',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
+      name: 'Open semantic map for current note',
+      editorCallback: async (_editor: Editor, view: MarkdownView) => {
         await this.openSemanticMap(view.file);
       }
     });
 
-    // Regenerate Semantic Graph
     this.addCommand({
-      id: 'regenerate-semantic-graph',
-      name: 'Regenerate Semantic Graph',
-      editorCallback: async (editor: Editor, view: MarkdownView) => {
+      id: 'regenerate-graph',
+      name: 'Regenerate graph for current note',
+      editorCallback: async (_editor: Editor, view: MarkdownView) => {
         await this.regenerateGraph(view.file);
       }
     });
 
-    // Batch classify folder
     this.addCommand({
       id: 'batch-classify-folder',
-      name: 'Batch Classify Folder',
+      name: 'Classify every note in the current folder',
       callback: async () => {
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile) {
-          const folder = activeFile.parent;
-          if (folder) {
-            await this.batchClassifyFolder(folder);
-          }
+        const folder = this.app.workspace.getActiveFile()?.parent;
+        if (folder) {
+          await this.batchClassifyFolder(folder);
+        } else {
+          new Notice('Open a note first, so there is a folder to work on.');
         }
       }
     });
 
-    // Index current folder
     this.addCommand({
       id: 'index-current-folder',
-      name: 'Index Current Folder',
+      name: 'Index the current folder',
       callback: async () => {
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile && activeFile.parent) {
-          await this.indexFolder(activeFile.parent);
+        const folder = this.app.workspace.getActiveFile()?.parent;
+        if (folder) {
+          await this.indexFolder(folder);
         } else {
-          new Notice('No folder selected');
+          new Notice('Open a note first, so there is a folder to index.');
         }
       }
     });
 
-    // Index selected folder (opens folder picker)
     this.addCommand({
-      id: 'index-select-folder',
-      name: 'Index Folder (Select)',
+      id: 'index-choose-folder',
+      name: 'Index a folder, choosing which',
       callback: async () => {
         await this.showFolderSelectionForIndex();
       }
     });
 
-    // Index entire vault
     this.addCommand({
       id: 'index-vault',
-      name: 'Index Entire Vault',
+      name: 'Index the whole vault',
       callback: async () => {
         await this.indexVault();
       }
     });
 
-    // Open concept tracker
     this.addCommand({
       id: 'open-concept-tracker',
-      name: 'Open Concept Tracker',
+      name: 'Open concept tracker',
       callback: async () => {
         await this.openConceptTracker();
       }
     });
 
-    // Search concepts
     this.addCommand({
-      id: 'search-concepts',
-      name: 'Search Concepts',
+      id: 'open-concept-journey',
+      name: 'Open concept journey',
       callback: async () => {
-        await this.openConceptTracker();
-        // The concept tracker view has a search tab
+        await this.openConceptJourney();
       }
     });
 
-    // Concept Registry commands
     this.addCommand({
-      id: 'view-concept-registry',
-      name: 'View Concept Registry Stats',
+      id: 'show-registry-stats',
+      name: 'Show concept registry statistics',
       callback: () => {
         const stats = this.conceptRegistry.getStats();
         const typeBreakdown = Object.entries(stats.byType)
@@ -307,61 +262,54 @@ export default class SemanticAIPlugin extends Plugin {
           .join('\n');
 
         new Notice(
-          `Concept Registry:\n` +
-          `Total concepts: ${stats.totalConcepts}\n` +
-          `Concepts with aliases: ${stats.withAliases}\n` +
-          `Last updated: ${new Date(stats.lastUpdated).toLocaleString()}\n` +
-          `By type:\n${typeBreakdown}`,
+          `Concepts: ${stats.totalConcepts}\n` +
+          `With aliases: ${stats.withAliases}\n` +
+          `Updated: ${new Date(stats.lastUpdated).toLocaleString()}\n` +
+          `By category:\n${typeBreakdown}`,
           10000
         );
       }
     });
 
     this.addCommand({
-      id: 'export-concept-registry',
-      name: 'Export Concept Registry',
+      id: 'export-registry',
+      name: 'Export concept registry',
       callback: async () => {
-        const json = this.conceptRegistry.exportJSON();
         const filename = `concept-registry-${new Date().toISOString().split('T')[0]}.json`;
 
-        // Create export file in vault root
-        await this.app.vault.create(filename, json);
-        new Notice(`Exported concept registry to ${filename}`);
+        if (this.app.vault.getAbstractFileByPath(filename)) {
+          new Notice(`${filename} already exists. Delete or rename it first.`);
+          return;
+        }
+
+        await this.app.vault.create(filename, this.conceptRegistry.exportJSON());
+        new Notice(`Exported to ${filename}`);
       }
     });
 
     this.addCommand({
-      id: 'save-concept-registry',
-      name: 'Save Concept Registry',
+      id: 'save-registry',
+      name: 'Save concept registry',
       callback: async () => {
         await this.conceptRegistry.save();
         new Notice('Concept registry saved');
       }
     });
-
-    // Concept Journey command
-    this.addCommand({
-      id: 'open-concept-journey',
-      name: 'Open Concept Journey',
-      callback: async () => {
-        await this.openConceptJourney();
-      }
-    });
   }
 
-  /**
-   * Register context menu items
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Menus                                                                  */
+  /* ---------------------------------------------------------------------- */
+
   private registerContextMenu(): void {
-    // File context menu
     this.registerEvent(
-      this.app.workspace.on('file-menu', (menu: Menu, file: TFile | TFolder) => {
+      this.app.workspace.on('file-menu', (menu: Menu, file) => {
         if (file instanceof TFile && file.extension === 'md') {
           menu.addSeparator();
 
           menu.addItem((item) => {
             item
-              .setTitle('Run AI Classifier')
+              .setTitle('Classify note')
               .setIcon('brain')
               .onClick(async () => {
                 await this.runClassifier(file);
@@ -370,43 +318,29 @@ export default class SemanticAIPlugin extends Plugin {
 
           menu.addItem((item) => {
             item
-              .setTitle('Open Semantic Map')
+              .setTitle('Classify, choosing categories')
+              .setIcon('tag')
+              .onClick(async () => {
+                await this.runClassifierWithSelection(file);
+              });
+          });
+
+          menu.addItem((item) => {
+            item
+              .setTitle('Open semantic map')
               .setIcon('git-branch')
               .onClick(async () => {
                 await this.openSemanticMap(file);
               });
           });
-
-          menu.addItem((item) => {
-            item
-              .setTitle('Show Hidden Tags')
-              .setIcon('eye')
-              .onClick(async () => {
-                this.settings.showHiddenTags = true;
-                await this.saveSettings();
-                new Notice('Hidden tags now visible');
-              });
-          });
-
-          // Classify as submenu
-          menu.addItem((item) => {
-            item
-              .setTitle('Classify as...')
-              .setIcon('tag')
-              .onClick(() => {
-                // Show type selection modal
-                this.runClassifierWithSelection(file);
-              });
-          });
         }
 
-        // Folder context menu
         if (file instanceof TFolder) {
           menu.addSeparator();
 
           menu.addItem((item) => {
             item
-              .setTitle('Batch Classify This Folder')
+              .setTitle('Classify every note in this folder')
               .setIcon('brain')
               .onClick(async () => {
                 await this.batchClassifyFolder(file);
@@ -415,7 +349,7 @@ export default class SemanticAIPlugin extends Plugin {
 
           menu.addItem((item) => {
             item
-              .setTitle('Index This Folder')
+              .setTitle('Index this folder')
               .setIcon('search')
               .onClick(async () => {
                 await this.indexFolder(file);
@@ -425,14 +359,13 @@ export default class SemanticAIPlugin extends Plugin {
       })
     );
 
-    // Editor context menu
     this.registerEvent(
-      this.app.workspace.on('editor-menu', (menu: Menu, editor: Editor, view: MarkdownView) => {
+      this.app.workspace.on('editor-menu', (menu: Menu, _editor: Editor, view: MarkdownView) => {
         menu.addSeparator();
 
         menu.addItem((item) => {
           item
-            .setTitle('Run AI Classifier')
+            .setTitle('Classify note')
             .setIcon('brain')
             .onClick(async () => {
               await this.runClassifier(view.file);
@@ -441,7 +374,7 @@ export default class SemanticAIPlugin extends Plugin {
 
         menu.addItem((item) => {
           item
-            .setTitle('Open Semantic Map')
+            .setTitle('Open semantic map')
             .setIcon('git-branch')
             .onClick(async () => {
               await this.openSemanticMap(view.file);
@@ -451,53 +384,33 @@ export default class SemanticAIPlugin extends Plugin {
     );
   }
 
-  /**
-   * Register event handlers
-   */
-  private registerEventHandlers(): void {
-    // Could add file change watchers here for auto-classification
-  }
-
-  /**
-   * Show semantic menu from ribbon
-   */
   private showSemanticMenu(evt: MouseEvent): void {
     const menu = new Menu();
 
     menu.addItem((item) => {
       item
-        .setTitle('Run AI Classifier')
+        .setTitle('Classify current note')
         .setIcon('brain')
         .onClick(async () => {
-          const file = this.app.workspace.getActiveFile();
-          if (file) {
-            await this.runClassifier(file);
-          } else {
-            new Notice('No active file');
-          }
+          await this.runClassifier(this.app.workspace.getActiveFile());
         });
     });
 
     menu.addItem((item) => {
       item
-        .setTitle('Open Semantic Map')
+        .setTitle('Classify, choosing categories')
+        .setIcon('tag')
+        .onClick(async () => {
+          await this.runClassifierWithSelection(this.app.workspace.getActiveFile());
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle('Open semantic map')
         .setIcon('git-branch')
         .onClick(async () => {
-          const file = this.app.workspace.getActiveFile();
-          if (file) {
-            await this.openSemanticMap(file);
-          }
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle('Toggle Hidden Tags')
-        .setIcon('eye')
-        .onClick(() => {
-          this.settings.showHiddenTags = !this.settings.showHiddenTags;
-          this.saveSettings();
-          new Notice(`Hidden tags ${this.settings.showHiddenTags ? 'shown' : 'hidden'}`);
+          await this.openSemanticMap(this.app.workspace.getActiveFile());
         });
     });
 
@@ -505,7 +418,7 @@ export default class SemanticAIPlugin extends Plugin {
 
     menu.addItem((item) => {
       item
-        .setTitle('Open Concept Tracker')
+        .setTitle('Open concept tracker')
         .setIcon('search')
         .onClick(async () => {
           await this.openConceptTracker();
@@ -514,7 +427,7 @@ export default class SemanticAIPlugin extends Plugin {
 
     menu.addItem((item) => {
       item
-        .setTitle('Open Concept Journey')
+        .setTitle('Open concept journey')
         .setIcon('route')
         .onClick(async () => {
           await this.openConceptJourney();
@@ -523,245 +436,189 @@ export default class SemanticAIPlugin extends Plugin {
 
     menu.addItem((item) => {
       item
-        .setTitle('Index Current Folder')
-        .setIcon('folder-search')
-        .onClick(async () => {
-          const activeFile = this.app.workspace.getActiveFile();
-          if (activeFile && activeFile.parent) {
-            await this.indexFolder(activeFile.parent);
-          } else {
-            new Notice('No folder selected');
-          }
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle('Index Entire Vault')
+        .setTitle('Index the whole vault')
         .setIcon('vault')
         .onClick(async () => {
           await this.indexVault();
         });
     });
 
-    menu.addSeparator();
-
-    menu.addItem((item) => {
-      item
-        .setTitle('Settings')
-        .setIcon('settings')
-        .onClick(() => {
-          // @ts-ignore - Accessing internal API
-          this.app.setting.open();
-          // @ts-ignore
-          this.app.setting.openTabById('obsidian-semantic-ai');
-        });
-    });
-
     menu.showAtMouseEvent(evt);
   }
 
-  /**
-   * Run AI classifier on a file
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Classification                                                         */
+  /* ---------------------------------------------------------------------- */
+
   async runClassifier(file: TFile | null): Promise<void> {
-    if (!file) {
-      new Notice('No file selected');
-      return;
-    }
-
-    const validation = this.classifier.validateConfiguration();
-    if (!validation.valid) {
-      new Notice(`Configuration error: ${validation.error}`);
-      return;
-    }
-
-    new Notice('Running AI classification...');
-
-    try {
-      const content = await this.app.vault.read(file);
-
-      const result = await this.classifier.classify(content, CKG_TYPES, file.path);
-
-      // Show result modal
-      new ClassificationResultModal(
-        this.app,
-        result,
-        file.path,
-        async () => {
-          // Apply tags
-          await writeTags(this.app.vault, file, result.tags);
-          new Notice(`Applied ${result.tags.length} tags`);
-
-          // Save concept registry
-          if (this.conceptRegistry.isDirty()) {
-            await this.conceptRegistry.save();
-          }
-
-          // Generate Mermaid if enabled
-          if (this.settings.autoGenerateMermaid) {
-            if (this.settings.mermaidPosition === 'panel') {
-              await this.openSemanticMap(file);
-            } else {
-              await this.appendMermaid(file, result.tags);
-            }
-          }
-        },
-        () => {
-          new Notice('Classification cancelled');
-        }
-      ).open();
-    } catch (error) {
-      console.error('Classification error:', error);
-      new Notice(`Classification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+    await this.runClassifierWithTypes(file, enabledCategoryIds(this.settings));
   }
 
-  /**
-   * Run classifier with type selection
-   */
   async runClassifierWithSelection(file: TFile | null): Promise<void> {
     if (!file) {
-      new Notice('No file selected');
+      new Notice('No note is open.');
       return;
     }
 
     new TagSelectionModal(
       this.app,
-      CKG_TYPES,
+      this.settings.categories,
+      enabledCategoryIds(this.settings),
       async (types) => {
         await this.runClassifierWithTypes(file, types);
-      },
-      () => {}
+      }
     ).open();
   }
 
-  /**
-   * Run classifier with specific types
-   */
-  async runClassifierWithTypes(file: TFile, types: TagType[]): Promise<void> {
+  async runClassifierWithTypes(file: TFile | null, types: TagType[]): Promise<void> {
+    if (!file) {
+      new Notice('No note is open.');
+      return;
+    }
+
     const validation = this.classifier.validateConfiguration();
     if (!validation.valid) {
-      new Notice(`Configuration error: ${validation.error}`);
+      new Notice(`Cannot classify: ${validation.error}. Check the plugin settings.`);
       return;
     }
 
-    new Notice('Running AI classification...');
+    const notice = new Notice('Classifying…', 0);
 
     try {
-      const content = await this.app.vault.read(file);
+      const content = await this.app.vault.cachedRead(file);
       const result = await this.classifier.classify(content, types, file.path);
+      notice.hide();
 
-      new ClassificationResultModal(
-        this.app,
-        result,
-        file.path,
-        async () => {
-          await writeTags(this.app.vault, file, result.tags);
-          new Notice(`Applied ${result.tags.length} tags`);
+      if (result.tags.length === 0) {
+        new Notice('Nothing matched the selected categories.');
+        return;
+      }
 
-          // Save concept registry
-          if (this.conceptRegistry.isDirty()) {
-            await this.conceptRegistry.save();
-          }
-
-          if (this.settings.autoGenerateMermaid) {
-            if (this.settings.mermaidPosition === 'panel') {
-              await this.openSemanticMap(file);
-            } else {
-              await this.appendMermaid(file, result.tags);
-            }
-          }
-        },
-        () => {
-          new Notice('Classification cancelled');
-        }
-      ).open();
+      this.showResult(file, result.tags, () => this.settings.autoGenerateMermaid);
     } catch (error) {
-      new Notice(`Classification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      notice.hide();
+      new Notice(this.errorMessage(error), 10000);
     }
   }
 
-  /**
-   * Classify as a specific type
-   */
   async classifyAs(file: TFile | null, type: TagType): Promise<void> {
     if (!file) {
-      new Notice('No file selected');
+      new Notice('No note is open.');
       return;
     }
 
-    new Notice(`Classifying as ${type}...`);
+    const validation = this.classifier.validateConfiguration();
+    if (!validation.valid) {
+      new Notice(`Cannot classify: ${validation.error}. Check the plugin settings.`);
+      return;
+    }
+
+    const notice = new Notice('Classifying…', 0);
 
     try {
-      const content = await this.app.vault.read(file);
+      const content = await this.app.vault.cachedRead(file);
       const result = await this.classifier.classifySingleType(content, type, file.path);
+      notice.hide();
 
-      new ClassificationResultModal(
-        this.app,
-        result,
-        file.path,
-        async () => {
-          await writeTags(this.app.vault, file, result.tags);
-          new Notice(`Applied ${result.tags.length} ${type} tags`);
+      if (result.tags.length === 0) {
+        new Notice(`No ${this.promptManager.getTagTypeName(type).toLowerCase()} found.`);
+        return;
+      }
 
-          // Save concept registry
-          if (this.conceptRegistry.isDirty()) {
-            await this.conceptRegistry.save();
-          }
-        },
-        () => {}
-      ).open();
+      this.showResult(file, result.tags, () => false);
     } catch (error) {
-      new Notice(`Classification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      notice.hide();
+      new Notice(this.errorMessage(error), 10000);
     }
   }
 
-  /**
-   * Open semantic map view
-   */
-  async openSemanticMap(file: TFile | null): Promise<void> {
+  async runCustomClassifier(file: TFile | null, keyword: string): Promise<void> {
     if (!file) {
-      new Notice('No file selected');
+      new Notice('No note is open.');
       return;
     }
 
-    // Get or create the view
-    let leaf = this.app.workspace.getLeavesOfType(MERMAID_VIEW_TYPE)[0];
+    const notice = new Notice(`Running "${keyword}"…`, 0);
 
-    if (!leaf) {
-      const rightLeaf = this.app.workspace.getRightLeaf(false);
-      if (rightLeaf) {
-        await rightLeaf.setViewState({
-          type: MERMAID_VIEW_TYPE,
-          active: true
-        });
-        leaf = rightLeaf;
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      const result = await this.classifier.classifyCustom(content, keyword, file.path);
+      notice.hide();
+
+      if (result.tags.length === 0) {
+        new Notice(`"${keyword}" found nothing.`);
+        return;
       }
+
+      this.showResult(file, result.tags, () => false);
+    } catch (error) {
+      notice.hide();
+      new Notice(this.errorMessage(error), 10000);
+    }
+  }
+
+  /** Preview the tags, then write them if the user confirms. */
+  private showResult(file: TFile, tags: SemanticTag[], wantsDiagram: () => boolean): void {
+    new ClassificationResultModal(
+      this.app,
+      this.settings,
+      { tags },
+      file.path,
+      async () => {
+        await writeTags(this.app.vault, file, tags);
+        new Notice(`Applied ${tags.length} tag${tags.length === 1 ? '' : 's'}`);
+
+        if (this.conceptRegistry.isDirty()) {
+          await this.conceptRegistry.save();
+        }
+
+        if (wantsDiagram()) {
+          if (this.settings.mermaidPosition === 'panel') {
+            await this.openSemanticMap(file);
+          } else {
+            await this.appendMermaid(file, tags);
+          }
+        }
+      }
+    ).open();
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : 'Something went wrong.';
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Graph                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  async openSemanticMap(file: TFile | null): Promise<void> {
+    if (!file) {
+      new Notice('No note is open.');
+      return;
     }
 
-    if (leaf) {
-      this.app.workspace.revealLeaf(leaf);
+    const leaf = await this.revealLeaf(MERMAID_VIEW_TYPE);
+    if (!leaf) {
+      return;
+    }
 
-      const view = leaf.view as MermaidView;
+    const view = leaf.view;
+    if (view instanceof MermaidView) {
       const tags = await readTags(this.app.vault, file);
       view.setTags(tags, file.path);
     }
   }
 
-  /**
-   * Regenerate semantic graph
-   */
   async regenerateGraph(file: TFile | null): Promise<void> {
     if (!file) {
-      new Notice('No file selected');
+      new Notice('No note is open.');
       return;
     }
 
     const tags = await readTags(this.app.vault, file);
 
     if (tags.length === 0) {
-      new Notice('No tags found in this file');
+      new Notice('This note has no tags yet.');
       return;
     }
 
@@ -770,72 +627,76 @@ export default class SemanticAIPlugin extends Plugin {
     } else {
       await this.appendMermaid(file, tags);
     }
-
-    new Notice('Graph regenerated');
   }
 
   /**
-   * Append Mermaid diagram to file
+   * Replace the note's diagram block with a fresh one.
+   *
+   * Uses Vault.process so the read and write are one atomic step, which keeps
+   * a concurrent edit from being overwritten.
    */
   private async appendMermaid(file: TFile, tags: SemanticTag[]): Promise<void> {
-    const mermaidBlock = createMermaidCodeBlock(tags, this.settings.graphDirection);
+    const mermaidBlock = createMermaidCodeBlock(tags, this.settings.graphDirection, this.settings);
 
-    if (mermaidBlock) {
-      let content = await this.app.vault.read(file);
-
-      // Remove existing mermaid block if present
-      content = content.replace(/\n\n```mermaid\ngraph[\s\S]*?```\n/g, '');
-
-      // Add new mermaid block before tags
-      const tagBlockIndex = content.indexOf('\n\n%%--- SEMANTIC TAGS ---%%');
-      if (tagBlockIndex !== -1) {
-        content = content.slice(0, tagBlockIndex) + mermaidBlock + content.slice(tagBlockIndex);
-      } else {
-        content = content.trimEnd() + mermaidBlock;
-      }
-
-      await this.app.vault.modify(file, content);
-    }
-  }
-
-  /**
-   * Batch classify folder
-   */
-  async batchClassifyFolder(folder: TFolder): Promise<void> {
-    const files = this.app.vault.getMarkdownFiles()
-      .filter(f => f.path.startsWith(folder.path));
-
-    if (files.length === 0) {
-      new Notice('No markdown files in folder');
+    if (!mermaidBlock) {
       return;
     }
 
-    // Get token estimate
+    await this.app.vault.process(file, (data) => {
+      // Drop any block this plugin wrote previously.
+      const content = data.replace(/\n\n```mermaid\ngraph[\s\S]*?```\n/g, '');
+
+      const tagBlockIndex = content.indexOf('\n\n%%--- SEMANTIC TAGS ---%%');
+      if (tagBlockIndex !== -1) {
+        return content.slice(0, tagBlockIndex) + mermaidBlock + content.slice(tagBlockIndex);
+      }
+
+      return content.trimEnd() + mermaidBlock;
+    });
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Batch processing                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  async batchClassifyFolder(folder: TFolder): Promise<void> {
+    const validation = this.classifier.validateConfiguration();
+    if (!validation.valid) {
+      new Notice(`Cannot classify: ${validation.error}. Check the plugin settings.`);
+      return;
+    }
+
+    const prefix = folder.isRoot() ? '' : `${folder.path}/`;
+    const files = this.app.vault.getMarkdownFiles()
+      .filter(f => f.path.startsWith(prefix));
+
+    if (files.length === 0) {
+      new Notice('No markdown notes in that folder.');
+      return;
+    }
+
+    const types = enabledCategoryIds(this.settings);
+
     const fileContents = await Promise.all(
       files.map(async f => ({
         path: f.path,
-        content: await this.app.vault.read(f)
+        content: await this.app.vault.cachedRead(f)
       }))
     );
 
-    const batchClassifier = new BatchClassifier(
-      this.classifier,
-      () => {}
-    );
+    const estimator = new BatchClassifier(this.classifier, () => undefined);
+    const estimate = estimator.estimateBatchCost(fileContents, types);
 
-    const estimate = batchClassifier.estimateBatchCost(fileContents, CKG_TYPES);
-
-    // Show confirmation modal
     const modal = new BatchProcessingModal(
       this.app,
       files,
       {
-        inputTokens: estimate.totalTokens,
-        estimatedOutputTokens: Math.ceil(estimate.totalTokens * 0.2),
+        inputTokens: Math.round(estimate.totalTokens / 1.2),
+        estimatedOutputTokens: Math.round(estimate.totalTokens - estimate.totalTokens / 1.2),
         estimatedCost: estimate.estimatedCost
       },
+      this.settings.showTokenEstimate,
       async () => {
-        // Start processing
         let totalTags = 0;
 
         const processor = new BatchClassifier(
@@ -848,32 +709,35 @@ export default class SemanticAIPlugin extends Plugin {
           }
         );
 
-        const results = await processor.processFiles(fileContents, defaultTypes);
+        modal.onCancelRun(() => processor.cancel());
 
-        // Write tags to files
+        const results = await processor.processFiles(fileContents, types);
+
         for (const [path, result] of results) {
-          const file = this.app.vault.getAbstractFileByPath(path) as TFile;
-          if (file && result.tags.length > 0) {
+          if (result.tags.length === 0) {
+            continue;
+          }
+          const file = this.app.vault.getAbstractFileByPath(path);
+          if (file instanceof TFile) {
             await writeTags(this.app.vault, file, result.tags);
           }
         }
 
-        // Save concept registry after batch processing
         if (this.conceptRegistry.isDirty()) {
           await this.conceptRegistry.save();
         }
 
         modal.complete(totalTags);
-      },
-      () => {}
+      }
     );
 
     modal.open();
   }
 
-  /**
-   * Index a specific folder
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Indexing                                                               */
+  /* ---------------------------------------------------------------------- */
+
   async indexFolder(folder: TFolder): Promise<void> {
     const estimate = await this.vaultIndexer.estimateIndexCost('folder', folder.path);
 
@@ -884,14 +748,10 @@ export default class SemanticAIPlugin extends Plugin {
       estimate,
       async () => {
         await this.runIndexing('folder', folder.path);
-      },
-      () => {}
+      }
     ).open();
   }
 
-  /**
-   * Index entire vault
-   */
   async indexVault(): Promise<void> {
     const estimate = await this.vaultIndexer.estimateIndexCost('vault');
 
@@ -902,14 +762,10 @@ export default class SemanticAIPlugin extends Plugin {
       estimate,
       async () => {
         await this.runIndexing('vault');
-      },
-      () => {}
+      }
     ).open();
   }
 
-  /**
-   * Run the actual indexing process
-   */
   private async runIndexing(scope: 'folder' | 'vault', folderPath?: string): Promise<void> {
     const progressModal = new IndexProgressModal(this.app);
     progressModal.open();
@@ -930,30 +786,16 @@ export default class SemanticAIPlugin extends Plugin {
         timeMs: index.metadata.processingTimeMs || 0
       });
 
-      // Open concept tracker after indexing
-      setTimeout(() => {
-        progressModal.close();
-        this.openConceptTracker();
-      }, 1500);
-
+      await this.openConceptTracker();
     } catch (error) {
       progressModal.close();
-      new Notice(`Indexing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      new Notice(`Indexing failed: ${this.errorMessage(error)}`);
     }
   }
 
-  /**
-   * Show folder selection modal for indexing
-   */
   async showFolderSelectionForIndex(): Promise<void> {
-    const folders: TFolder[] = [];
-
-    // Get all folders
-    this.app.vault.getAllLoadedFiles().forEach(file => {
-      if (file instanceof TFolder) {
-        folders.push(file);
-      }
-    });
+    const folders = this.app.vault.getAllLoadedFiles()
+      .filter((f): f is TFolder => f instanceof TFolder);
 
     new FolderSelectionModal(
       this.app,
@@ -964,241 +806,156 @@ export default class SemanticAIPlugin extends Plugin {
     ).open();
   }
 
-  /**
-   * Open the concept tracker view
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Views                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  /** Find or create a leaf of the given type in the right sidebar. */
+  private async revealLeaf(viewType: string): Promise<WorkspaceLeaf | null> {
+    const existing = this.app.workspace.getLeavesOfType(viewType)[0];
+
+    if (existing) {
+      this.app.workspace.revealLeaf(existing);
+      return existing;
+    }
+
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) {
+      new Notice('Could not open the side panel.');
+      return null;
+    }
+
+    await leaf.setViewState({ type: viewType, active: true });
+    this.app.workspace.revealLeaf(leaf);
+    return leaf;
+  }
+
+  private openFileByPath(filePath: string): void {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (file instanceof TFile) {
+      this.app.workspace.getLeaf().openFile(file);
+    }
+  }
+
   async openConceptTracker(): Promise<void> {
-    let leaf = this.app.workspace.getLeavesOfType(CONCEPT_TRACKER_VIEW_TYPE)[0];
+    const leaf = await this.revealLeaf(CONCEPT_TRACKER_VIEW_TYPE);
+    const view = leaf?.view;
 
-    if (!leaf) {
-      const rightLeaf = this.app.workspace.getRightLeaf(false);
-      if (rightLeaf) {
-        await rightLeaf.setViewState({
-          type: CONCEPT_TRACKER_VIEW_TYPE,
-          active: true
-        });
-        leaf = rightLeaf;
-      }
-    }
-
-    if (leaf) {
-      this.app.workspace.revealLeaf(leaf);
-
-      const view = leaf.view as ConceptTrackerView;
-      const index = this.vaultIndexer.getIndex();
-      view.setIndex(index);
+    if (view instanceof ConceptTrackerView) {
+      view.setIndex(this.vaultIndexer.getIndex());
     }
   }
 
-  /**
-   * Open the concept journey view
-   */
   async openConceptJourney(): Promise<void> {
-    let leaf = this.app.workspace.getLeavesOfType(CONCEPT_JOURNEY_VIEW_TYPE)[0];
+    const leaf = await this.revealLeaf(CONCEPT_JOURNEY_VIEW_TYPE);
+    const view = leaf?.view;
 
-    if (!leaf) {
-      const rightLeaf = this.app.workspace.getRightLeaf(false);
-      if (rightLeaf) {
-        await rightLeaf.setViewState({
-          type: CONCEPT_JOURNEY_VIEW_TYPE,
-          active: true
-        });
-        leaf = rightLeaf;
-      }
+    if (!(view instanceof ConceptJourneyView)) {
+      return;
     }
 
-    if (leaf) {
-      this.app.workspace.revealLeaf(leaf);
-
-      const view = leaf.view as ConceptJourneyView;
-      const index = this.vaultIndexer.getIndex();
-
-      // Set up the view with data sources and callbacks
-      view.setDataSources(
-        this.conceptRegistry,
-        index,
-        // Open file callback
-        (filePath: string) => {
-          const file = this.app.vault.getAbstractFileByPath(filePath);
-          if (file instanceof TFile) {
-            this.app.workspace.getLeaf().openFile(file);
-          }
-        },
-        // Analyze journey callback
-        async (journey: ConceptJourney): Promise<JourneyAnalysis> => {
-          return this.analyzeConceptJourney(journey);
-        },
-        // Generate forward links callback
-        async (journey: ConceptJourney): Promise<void> => {
-          return this.generateConceptForwardLinks(journey);
-        }
-      );
-    }
+    view.setDataSources(
+      this.conceptRegistry,
+      this.vaultIndexer.getIndex(),
+      (filePath: string) => this.openFileByPath(filePath),
+      async (journey: ConceptJourney): Promise<JourneyAnalysis> => this.analyzeConceptJourney(journey),
+      async (journey: ConceptJourney): Promise<void> => this.generateConceptForwardLinks(journey)
+    );
   }
 
-  /**
-   * Analyze a concept journey using AI
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Concept journeys                                                       */
+  /* ---------------------------------------------------------------------- */
+
   private async analyzeConceptJourney(journey: ConceptJourney): Promise<JourneyAnalysis> {
     const validation = this.classifier.validateConfiguration();
     if (!validation.valid) {
-      throw new Error(`Configuration error: ${validation.error}`);
+      throw new Error(`Cannot analyse: ${validation.error}.`);
     }
-
-    // Build the occurrences list for the prompt
-    const occurrences = journey.occurrences.map(o => ({
-      file: o.fileName,
-      type: o.tag.type,
-      label: o.tag.label
-    }));
 
     const prompt = this.promptManager.buildConceptJourneyPrompt(
       journey.concept,
       journey.aliases,
-      occurrences
+      journey.occurrences.map(o => ({
+        file: o.fileName,
+        type: o.tag.type,
+        label: o.tag.label
+      }))
     );
 
+    const response = await this.classifier.complete(prompt, 2048);
+
+    let jsonStr = response.trim();
+
+    const fenced = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenced) {
+      jsonStr = fenced[1].trim();
+    }
+
+    const objectMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      jsonStr = objectMatch[0];
+    }
+
     try {
-      // Call the AI using the classifier's internal method via a simple wrapper
-      const response = await this.callAIForJourney(prompt);
-
-      // Parse the response
-      let jsonStr = response.trim();
-      const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (jsonMatch) {
-        jsonStr = jsonMatch[1].trim();
-      }
-
-      const objectMatch = jsonStr.match(/\{[\s\S]*\}/);
-      if (objectMatch) {
-        jsonStr = objectMatch[0];
-      }
-
       const analysis = JSON.parse(jsonStr);
 
       return {
-        narrative: analysis.narrative || 'No narrative generated.',
-        contradictions: analysis.contradictions || [],
-        gaps: analysis.gaps || [],
-        suggestions: analysis.suggestions || []
+        narrative: typeof analysis.narrative === 'string' ? analysis.narrative : 'No narrative returned.',
+        contradictions: Array.isArray(analysis.contradictions) ? analysis.contradictions : [],
+        gaps: Array.isArray(analysis.gaps) ? analysis.gaps : [],
+        suggestions: Array.isArray(analysis.suggestions) ? analysis.suggestions : []
       };
-    } catch (error) {
-      console.error('Journey analysis error:', error);
-      throw new Error(`Analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } catch {
+      throw new Error('The model did not return valid JSON for this analysis.');
     }
   }
 
   /**
-   * Call AI for journey analysis (wrapper method)
-   */
-  private async callAIForJourney(prompt: string): Promise<string> {
-    // Use requestUrl directly since we can't access private methods
-    const { requestUrl } = await import('obsidian');
-
-    if (!this.settings.apiKey && this.settings.aiProvider !== 'ollama') {
-      throw new Error('API key not configured');
-    }
-
-    switch (this.settings.aiProvider) {
-      case 'openai': {
-        const response = await requestUrl({
-          url: this.settings.apiEndpoint || 'https://api.openai.com/v1/chat/completions',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.settings.apiKey}`
-          },
-          body: JSON.stringify({
-            model: this.settings.modelName || 'gpt-4o-mini',
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.3,
-            max_tokens: 2048
-          })
-        });
-        return response.json.choices[0]?.message?.content || '';
-      }
-
-      case 'anthropic': {
-        const response = await requestUrl({
-          url: 'https://api.anthropic.com/v1/messages',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': this.settings.apiKey,
-            'anthropic-version': '2023-06-01'
-          },
-          body: JSON.stringify({
-            model: this.settings.modelName || 'claude-3-haiku-20240307',
-            max_tokens: 2048,
-            messages: [{ role: 'user', content: prompt }]
-          })
-        });
-        return response.json.content[0]?.text || '';
-      }
-
-      case 'ollama': {
-        const response = await requestUrl({
-          url: this.settings.apiEndpoint || 'http://localhost:11434/api/generate',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: this.settings.modelName || 'llama2',
-            prompt: prompt,
-            stream: false
-          })
-        });
-        return response.json.response || '';
-      }
-
-      default:
-        throw new Error(`Unknown AI provider: ${this.settings.aiProvider}`);
-    }
-  }
-
-  /**
-   * Generate forward links for a concept journey
+   * Link each occurrence of a concept to the next one, so a note points at
+   * where the idea is picked up again.
    */
   private async generateConceptForwardLinks(journey: ConceptJourney): Promise<void> {
     if (journey.occurrences.length < 2) {
-      new Notice('Need at least 2 occurrences to generate forward links');
+      new Notice('A concept needs at least two occurrences to link them up.');
       return;
     }
 
     let linksAdded = 0;
 
-    // Add forward link comments to each file pointing to the next occurrence
     for (let i = 0; i < journey.occurrences.length - 1; i++) {
       const current = journey.occurrences[i];
       const next = journey.occurrences[i + 1];
 
       const file = this.app.vault.getAbstractFileByPath(current.file);
-      if (!(file instanceof TFile)) continue;
+      if (!(file instanceof TFile)) {
+        continue;
+      }
 
-      const content = await this.app.vault.read(file);
-
-      // Create forward link comment
       const forwardLink = `\n%%forward-link::${journey.concept}::[[${next.fileName}]]%%`;
+      let added = false;
 
-      // Check if link already exists
-      if (content.includes(`forward-link::${journey.concept}`)) {
-        continue; // Skip if already has forward link for this concept
+      await this.app.vault.process(file, (content) => {
+        if (content.includes(`forward-link::${journey.concept}`)) {
+          return content;
+        }
+
+        added = true;
+
+        const tagBlockEnd = content.indexOf(TAG_BLOCK_END);
+        if (tagBlockEnd !== -1) {
+          const cut = tagBlockEnd + TAG_BLOCK_END.length;
+          return content.slice(0, cut) + forwardLink + content.slice(cut);
+        }
+
+        return content.trimEnd() + forwardLink;
+      });
+
+      if (added) {
+        linksAdded++;
       }
-
-      // Add after the tag block or at the end
-      let newContent: string;
-      const tagBlockEnd = content.indexOf('%%--- END SEMANTIC TAGS ---%%');
-      if (tagBlockEnd !== -1) {
-        newContent = content.slice(0, tagBlockEnd + '%%--- END SEMANTIC TAGS ---%%'.length) +
-                     forwardLink +
-                     content.slice(tagBlockEnd + '%%--- END SEMANTIC TAGS ---%%'.length);
-      } else {
-        newContent = content.trimEnd() + forwardLink;
-      }
-
-      await this.app.vault.modify(file, newContent);
-      linksAdded++;
     }
 
-    new Notice(`Added ${linksAdded} forward links for "${journey.concept}"`);
+    new Notice(`Added ${linksAdded} forward link${linksAdded === 1 ? '' : 's'} for "${journey.concept}"`);
   }
 }

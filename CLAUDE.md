@@ -2,8 +2,10 @@
 
 > This file is the compressed specification for any AI programmer working on this plugin.
 > It contains: (1) the Obsidian Plugin Skill kernel (all 27 rules, submission requirements,
-> accessibility mandates, API preferences, CSS patterns), and (2) the CKG dual-axis
-> classification system that defines this plugin's core functionality.
+> accessibility mandates, API preferences, CSS patterns), and (2) the dual-axis
+> classification model the plugin is built around.
+>
+> See `PLUGIN_STANDARDS.md` for the audit record of how the current code measures up.
 
 ---
 
@@ -118,86 +120,67 @@ t:k|v:1.0|s:OBS-PLUGIN-SKILL|r:~20:1|L:~160|a:gapmiss|d:"expand§→full_rules;R
 
 ---
 
-## Part 2: CKG Dual-Axis Classification System
+## Part 2: The dual-axis classification model
 
-This plugin implements a **Canonical Knowledge Graph (CKG)** with dual-axis classification:
+This plugin classifies text on **two independent axes**. Neither axis is hard-coded — both
+are plain data in `settings`, editable in the settings tab, so the same plugin serves a
+research vault, a project log, or a novel draft.
 
-### Axis 1 — "What is this?" (Epistemic Type)
+| Axis | Question | Type | Stored in |
+|------|----------|------|-----------|
+| 1 — categories | "What is this?" | `CategoryDefinition[]` | `settings.categories` |
+| 2 — topics | "Where does it belong?" | `TopicDefinition[]` | `settings.topics` |
 
-The `TagType` union in `src/types.ts` defines all classification categories:
+`TagType` and `Domain` are `string` aliases, not closed unions. Whatever id the user gives a
+category is what gets written into the note, which is why ids from earlier versions
+(`Axiom`, `Claim`, …) keep parsing unchanged.
 
-| Type | Description |
-|------|-------------|
-| Axiom | Self-evident foundational truths (framework axioms A1-A188) |
-| Claim | Assertions requiring evidence/argument |
-| Hypothesis | Testable predictions derived from framework |
-| Definition | Formal term definitions establishing meaning |
-| Theory | Comprehensive explanatory frameworks |
-| Observation | Empirical data points or experimental findings |
-| Law | Established regularities (mathematical relationships) |
-| Theorem | Formally proven propositions |
-| Lemma | Supporting propositions used in proofs |
-| Canonical | Authoritative framework elements (axiom-derived) |
-| EvidenceBundle | Collections of supporting evidence |
-| ScientificProcess | Methodological steps and procedures |
-| Relationship | Connections between concepts |
-| InternalLink | Links within the vault |
-| ExternalLink | Links to external resources |
-| ProperName | Named entities (people, places, institutions) |
-| ForwardLink | Placeholder links to future content |
-| WordOntology | Vocabulary and terminology mappings |
-| Sentence | Sentence-level semantic units |
-| Paragraph | Paragraph-level semantic units |
-| Custom | User-defined classifier output |
+### Presets
 
-The **CKG_TYPES** constant exports the 11 core epistemic types used as defaults:
-`Axiom, Claim, Hypothesis, Definition, Theory, Observation, Law, Theorem, Lemma, Canonical, EvidenceBundle`
+`TAXONOMY_PRESETS` in `src/types.ts` ships five starting points: `general` (the default for a
+fresh install), `research`, `project`, `writing`, and `blank`. Loading a preset copies its
+categories and topics into settings; editing anything sets `presetId` to `'custom'`.
 
-### Axis 2 — "Where does this resonate?" (Domain Mapping)
+The **research preset carries the CKG epistemic set** — Axiom, Claim, Hypothesis, Definition,
+Theory, Observation, Law, Theorem, Lemma, Canonical, EvidenceBundle enabled by default, with
+the structural categories (Relationship, InternalLink, ProperName, WordOntology, …) present
+but disabled — and the ten Theophysics domains as its topic list. `migrateSettings()` moves
+any pre-2.0 vault onto this preset automatically, preserving prompt edits.
 
-The `Domain` type defines 10 knowledge domains:
+### Working on the taxonomy
 
-| Domain | Scope |
-|--------|-------|
-| Physics | Physical laws, forces, fields, particles, spacetime, quantum mechanics |
-| Theology | Divine nature, revelation, scripture, soteriology, ecclesiology |
-| Mathematics | Formal systems, proofs, number theory, algebra, topology |
-| InformationTheory | Entropy, information content, coding theory, signal processing |
-| Consciousness | Qualia, awareness, observer effects, phenomenology |
-| Morality | Ethics, moral law, good/evil, justice, virtue |
-| Cosmology | Universe origins, cosmic evolution, dark energy, large-scale structure |
-| Biology | Life processes, evolution, genetics, cellular mechanisms |
-| Philosophy | Epistemology, ontology, logic, metaphysics |
-| History | Historical events, periods, historiography |
+- Never reintroduce a hard-coded category name in a `switch`, a union type, a CSS class, or a
+  UI list. Read from `settings.categories`, and use the helpers in `src/types.ts`:
+  `enabledCategoryIds`, `categoryName`, `categoryPlural`, `categoryColor`, `topicsActive`.
+- Colours are palette slots 1-8 rendered via `data-color`, mapped to Obsidian theme variables
+  in `styles.css`. Do not add per-category CSS.
+- Prompt wording must stay subject-neutral. Vault-specific framing belongs in
+  `settings.systemContext`, which the user writes.
 
-Every element gets classified on **both axes simultaneously**. Domain mapping is toggled via `settings.enableDomainMapping`.
-
-### Key Files
+### Key files
 
 | File | Purpose |
 |------|---------|
-| `src/types.ts` | All type definitions, defaults, domain constants |
-| `src/main.ts` | Plugin class, 20+ commands, context menus, ribbon |
-| `src/settings.ts` | Settings tab UI |
-| `src/ai/classifier.ts` | AI classification engine (OpenAI, Anthropic, Ollama, Custom) |
-| `src/ai/prompt-manager.ts` | Prompt construction for all tag types + domains |
-| `src/tagging/tag-writer.ts` | YAML frontmatter tag persistence |
-| `src/tagging/tag-store.ts` | In-memory tag index |
-| `src/graph/` | D3.js force-directed graph visualization |
-| `styles.css` | All plugin CSS (use Obsidian CSS variables) |
-| `manifest.json` | Plugin metadata |
+| `src/types.ts` | Types, presets, provider registry, `migrateSettings()` |
+| `src/main.ts` | Plugin class, commands, menus, view wiring |
+| `src/settings.ts` | Settings tab: providers, categories, topics, display, sync |
+| `src/ai/classifier.ts` | Provider transport, response parsing, tag construction |
+| `src/ai/prompt-manager.ts` | Prompt construction, taxonomy import and export |
+| `src/tagging/tag-writer.ts` | Tag block read, write, and parse |
+| `src/tagging/concept-registry.ts` | Stable UUID per concept |
+| `src/indexing/vault-indexer.ts` | Cross-note concept index |
+| `src/ui/` | Semantic map, concept tracker, concept journey, modals |
+| `styles.css` | All CSS; Obsidian variables only |
+| `PLUGIN_STANDARDS.md` | Audit record: what was checked, fixed, and left open |
 
-### Framework Context
+### AI providers
 
-This plugin serves **David Lowe's Theophysics** — a 188-axiom framework unifying physics, consciousness, and theology via the Logos Field (chi). The Master Equation:
+Credentials are per provider in `settings.providers`, so an OpenAI key and a DeepSeek key
+coexist and switching providers loses neither. `PROVIDERS` in `src/types.ts` describes each
+one; `wireFormat` (`openai` | `anthropic` | `ollama`) selects the request shape, so an
+OpenAI-compatible provider needs only a new entry in that table.
 
-```
-chi = triple_integral(G * M * E * S * T * K * R * Q * F * C) dx dy dt
-```
-
-The CKG treats consciousness as fundamental (not emergent), and physics + theology as dual projections of a single substrate.
-
----
+All requests go through `AIClassifier.complete()`. Do not add a second call path.
 
 ## Review Checklist
 
@@ -209,7 +192,8 @@ Before any commit:
 - [ ] Accessibility: keyboard nav, ARIA labels, `:focus-visible`, 44px touch targets
 - [ ] CSS: Obsidian variables only, scoped selectors, no inline styles
 - [ ] Security: no `innerHTML`, no regex lookbehind
-- [ ] `CKG_TYPES` used as default (not hardcoded arrays)
-- [ ] Domain mapping respects `enableDomainMapping` toggle
+- [ ] Categories read from `settings.categories`, never a hardcoded array
+- [ ] Second axis respects the `enableTopics` toggle and `topicsActive()`
+- [ ] `npm run lint` and `npm run build` both clean
 - [ ] Light + dark themes tested
 - [ ] Mobile tested

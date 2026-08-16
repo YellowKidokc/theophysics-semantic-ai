@@ -4,7 +4,7 @@
  * This is the single source of truth for concept identification
  */
 
-import { Vault } from 'obsidian';
+import { Notice, Vault, normalizePath } from 'obsidian';
 import { TagType } from '../types';
 import { generateUUID } from './uuid-generator';
 
@@ -32,7 +32,7 @@ export interface ConceptRegistryData {
   uuidIndex: Record<string, string>;  // uuid -> normalized label (reverse lookup)
 }
 
-const REGISTRY_FILE = '.obsidian/plugins/obsidian-semantic-ai/concept-registry.json';
+const REGISTRY_FILENAME = 'concept-registry.json';
 const REGISTRY_VERSION = '1.0.0';
 
 /**
@@ -41,12 +41,20 @@ const REGISTRY_VERSION = '1.0.0';
  */
 export class ConceptRegistry {
   private vault: Vault;
+  private registryPath: string;
   private data: ConceptRegistryData;
   private loaded: boolean = false;
   private dirty: boolean = false;
 
-  constructor(vault: Vault) {
+  /**
+   * @param pluginDir the plugin's own folder, from `manifest.dir`. It sits
+   *   inside the config directory, which is not part of the vault file tree,
+   *   so this class goes through the adapter rather than the Vault API.
+   */
+  constructor(vault: Vault, pluginDir?: string) {
     this.vault = vault;
+    const base = pluginDir || `${vault.configDir}/plugins/semantic-ai`;
+    this.registryPath = normalizePath(`${base}/${REGISTRY_FILENAME}`);
     this.data = this.createEmptyRegistry();
   }
 
@@ -79,25 +87,30 @@ export class ConceptRegistry {
    */
   async load(): Promise<void> {
     try {
-      const file = this.vault.getAbstractFileByPath(REGISTRY_FILE);
+      if (await this.vault.adapter.exists(this.registryPath)) {
+        const content = await this.vault.adapter.read(this.registryPath);
+        const parsed = JSON.parse(content) as ConceptRegistryData;
 
-      if (file) {
-        const content = await this.vault.read(file as any);
-        this.data = JSON.parse(content);
+        this.data = {
+          version: parsed.version || REGISTRY_VERSION,
+          lastUpdated: parsed.lastUpdated || new Date().toISOString(),
+          concepts: parsed.concepts || {},
+          uuidIndex: parsed.uuidIndex || {}
+        };
 
-        // Migration check
-        if (!this.data.version || this.data.version !== REGISTRY_VERSION) {
+        if (this.data.version !== REGISTRY_VERSION) {
           this.migrateRegistry();
         }
       } else {
-        // Create new registry
         this.data = this.createEmptyRegistry();
-        await this.save();
+        this.dirty = true;
       }
 
       this.loaded = true;
     } catch (error) {
-      console.error('Failed to load concept registry:', error);
+      // A corrupt registry must not stop the plugin loading; start fresh and
+      // leave the old file alone so it can be recovered by hand.
+      new Notice('Semantic AI could not read its concept registry, so it started a new one.');
       this.data = this.createEmptyRegistry();
       this.loaded = true;
     }
@@ -110,28 +123,18 @@ export class ConceptRegistry {
     if (!this.dirty && this.loaded) return;
 
     this.data.lastUpdated = new Date().toISOString();
-    const content = JSON.stringify(this.data, null, 2);
 
     try {
-      // Ensure directory exists
-      const dir = REGISTRY_FILE.substring(0, REGISTRY_FILE.lastIndexOf('/'));
-      const dirExists = this.vault.getAbstractFileByPath(dir);
+      const dir = this.registryPath.slice(0, this.registryPath.lastIndexOf('/'));
 
-      if (!dirExists) {
-        await this.vault.createFolder(dir);
+      if (dir && !(await this.vault.adapter.exists(dir))) {
+        await this.vault.adapter.mkdir(dir);
       }
 
-      const file = this.vault.getAbstractFileByPath(REGISTRY_FILE);
-
-      if (file) {
-        await this.vault.modify(file as any, content);
-      } else {
-        await this.vault.create(REGISTRY_FILE, content);
-      }
-
+      await this.vault.adapter.write(this.registryPath, JSON.stringify(this.data, null, 2));
       this.dirty = false;
     } catch (error) {
-      console.error('Failed to save concept registry:', error);
+      new Notice('Semantic AI could not save its concept registry.');
     }
   }
 
@@ -157,7 +160,7 @@ export class ConceptRegistry {
     }
 
     // Check aliases
-    for (const [key, entry] of Object.entries(this.data.concepts)) {
+    for (const entry of Object.values(this.data.concepts)) {
       if (entry.aliases.includes(normalized)) {
         return entry.uuid;
       }

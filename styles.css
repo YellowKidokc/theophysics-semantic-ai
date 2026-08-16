@@ -1,4 +1,188 @@
-/* Semantic AI Plugin Styles */
+/* Semantic AI
+
+   All colours come from Obsidian's theme variables, so light and dark themes
+   and community themes are handled without any per-theme overrides here.
+
+   Categories are user-defined, so their colours are addressed by palette slot
+   (data-color="1" … "8") rather than by category name.
+*/
+
+.theme-light,
+.theme-dark {
+  --semantic-ai-1: var(--color-blue);
+  --semantic-ai-2: var(--color-orange);
+  --semantic-ai-3: var(--color-green);
+  --semantic-ai-4: var(--color-purple);
+  --semantic-ai-5: var(--color-cyan);
+  --semantic-ai-6: var(--color-pink);
+  --semantic-ai-7: var(--color-yellow);
+  --semantic-ai-8: var(--color-red);
+}
+
+/* Colour swatches, badges, and summary tiles all read the same slot. */
+.semantic-ai-tag-type[data-color="1"],
+.semantic-ai-tag-badge[data-color="1"],
+.semantic-ai-badge[data-color="1"],
+.type-badge[data-color="1"],
+.semantic-ai-color-swatch[data-color="1"] { background-color: var(--semantic-ai-1); }
+
+.semantic-ai-tag-type[data-color="2"],
+.semantic-ai-tag-badge[data-color="2"],
+.semantic-ai-badge[data-color="2"],
+.type-badge[data-color="2"],
+.semantic-ai-color-swatch[data-color="2"] { background-color: var(--semantic-ai-2); }
+
+.semantic-ai-tag-type[data-color="3"],
+.semantic-ai-tag-badge[data-color="3"],
+.semantic-ai-badge[data-color="3"],
+.type-badge[data-color="3"],
+.semantic-ai-color-swatch[data-color="3"] { background-color: var(--semantic-ai-3); }
+
+.semantic-ai-tag-type[data-color="4"],
+.semantic-ai-tag-badge[data-color="4"],
+.semantic-ai-badge[data-color="4"],
+.type-badge[data-color="4"],
+.semantic-ai-color-swatch[data-color="4"] { background-color: var(--semantic-ai-4); }
+
+.semantic-ai-tag-type[data-color="5"],
+.semantic-ai-tag-badge[data-color="5"],
+.semantic-ai-badge[data-color="5"],
+.type-badge[data-color="5"],
+.semantic-ai-color-swatch[data-color="5"] { background-color: var(--semantic-ai-5); }
+
+.semantic-ai-tag-type[data-color="6"],
+.semantic-ai-tag-badge[data-color="6"],
+.semantic-ai-badge[data-color="6"],
+.type-badge[data-color="6"],
+.semantic-ai-color-swatch[data-color="6"] { background-color: var(--semantic-ai-6); }
+
+.semantic-ai-tag-type[data-color="7"],
+.semantic-ai-tag-badge[data-color="7"],
+.semantic-ai-badge[data-color="7"],
+.type-badge[data-color="7"],
+.semantic-ai-color-swatch[data-color="7"] { background-color: var(--semantic-ai-7); }
+
+.semantic-ai-tag-type[data-color="8"],
+.semantic-ai-tag-badge[data-color="8"],
+.semantic-ai-badge[data-color="8"],
+.type-badge[data-color="8"],
+.semantic-ai-color-swatch[data-color="8"] { background-color: var(--semantic-ai-8); }
+
+.semantic-ai-summary-item[data-color="1"] { border-left-color: var(--semantic-ai-1); }
+.semantic-ai-summary-item[data-color="2"] { border-left-color: var(--semantic-ai-2); }
+.semantic-ai-summary-item[data-color="3"] { border-left-color: var(--semantic-ai-3); }
+.semantic-ai-summary-item[data-color="4"] { border-left-color: var(--semantic-ai-4); }
+.semantic-ai-summary-item[data-color="5"] { border-left-color: var(--semantic-ai-5); }
+.semantic-ai-summary-item[data-color="6"] { border-left-color: var(--semantic-ai-6); }
+.semantic-ai-summary-item[data-color="7"] { border-left-color: var(--semantic-ai-7); }
+.semantic-ai-summary-item[data-color="8"] { border-left-color: var(--semantic-ai-8); }
+
+/* Keyboard focus is always visible, and never shown for mouse clicks. */
+.semantic-ai-settings-tab button:focus-visible,
+.semantic-ai-settings-tab select:focus-visible,
+.semantic-ai-settings-tab input:focus-visible,
+.semantic-ai-settings-tab textarea:focus-visible,
+.semantic-ai-settings-tab summary:focus-visible,
+.semantic-ai-map-view button:focus-visible,
+.semantic-ai-tracker-tab:focus-visible,
+.semantic-ai-file-link:focus-visible,
+.semantic-ai-folder-item:focus-visible,
+.step-file-link:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+/* Touch targets stay large enough to hit on a phone or tablet. */
+.semantic-ai-main-tab-btn,
+.semantic-ai-tracker-tab,
+.semantic-ai-folder-item,
+.semantic-ai-copy-btn,
+.semantic-ai-toggle-code {
+  min-height: 44px;
+}
+
+@media (pointer: fine) {
+  .semantic-ai-main-tab-btn,
+  .semantic-ai-tracker-tab,
+  .semantic-ai-copy-btn,
+  .semantic-ai-toggle-code {
+    min-height: 32px;
+  }
+}
+
+/* Settings widgets added by this plugin. */
+.semantic-ai-provider-block {
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: var(--size-4-3);
+  margin-bottom: var(--size-4-4);
+}
+
+.semantic-ai-provider-block.is-active {
+  border-left-color: var(--interactive-accent);
+}
+
+.semantic-ai-category-item {
+  position: relative;
+  padding-left: var(--size-4-4);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.semantic-ai-color-swatch {
+  position: absolute;
+  left: 0;
+  top: var(--size-4-4);
+  width: var(--size-4-2);
+  height: var(--size-4-2);
+  border-radius: var(--radius-s);
+  background-color: var(--interactive-accent);
+}
+
+.semantic-ai-category-details > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: var(--size-4-1) 0;
+}
+
+.semantic-ai-topic-item .setting-item-control {
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+}
+
+.semantic-ai-wide-input {
+  width: 100%;
+  min-width: 12rem;
+}
+
+.semantic-ai-mono-input {
+  font-family: var(--font-monospace-theme);
+}
+
+.semantic-ai-tag-topics {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+/* File links are buttons so they can be reached by keyboard; make them read
+   as links. */
+.semantic-ai-file-link,
+.step-file-link {
+  background: none;
+  border: none;
+  padding: 0;
+  box-shadow: none;
+  color: var(--text-accent);
+  cursor: pointer;
+  font-size: inherit;
+  text-align: left;
+}
+
+.semantic-ai-file-link:hover,
+.step-file-link:hover {
+  text-decoration: underline;
+}
+
 
 /* ===== Tab Navigation ===== */
 .semantic-ai-tabs,
@@ -194,15 +378,6 @@
   font-weight: 500;
 }
 
-.semantic-ai-tag-type.type-axiom { background: #01579b; }
-.semantic-ai-tag-type.type-claim { background: #e65100; }
-.semantic-ai-tag-type.type-evidencebundle { background: #1b5e20; }
-.semantic-ai-tag-type.type-relationship { background: #4a148c; }
-.semantic-ai-tag-type.type-scientificprocess { background: #880e4f; }
-.semantic-ai-tag-type.type-internallink { background: #006064; }
-.semantic-ai-tag-type.type-externallink { background: #006064; }
-.semantic-ai-tag-type.type-propername { background: #ff6f00; }
-.semantic-ai-tag-type.type-wordontology { background: #3e2723; }
 
 .semantic-ai-tag-label {
   flex: 1;
@@ -335,6 +510,7 @@
   padding: 0.5rem 1rem;
   background: var(--background-secondary);
   border-radius: var(--radius-s);
+  border-left: 3px solid var(--background-modifier-border);
   min-width: 80px;
 }
 
@@ -411,13 +587,6 @@
   font-weight: 500;
 }
 
-.semantic-ai-tag-badge[data-type="Axiom"] { background: #01579b; }
-.semantic-ai-tag-badge[data-type="Claim"] { background: #e65100; }
-.semantic-ai-tag-badge[data-type="EvidenceBundle"] { background: #1b5e20; }
-.semantic-ai-tag-badge[data-type="Relationship"] { background: #4a148c; }
-.semantic-ai-tag-badge[data-type="ScientificProcess"] { background: #880e4f; }
-.semantic-ai-tag-badge[data-type="ProperName"] { background: #ff6f00; }
-.semantic-ai-tag-badge[data-type="WordOntology"] { background: #3e2723; }
 
 .semantic-ai-tag-label {
   flex: 1;
@@ -603,13 +772,6 @@
   font-weight: 500;
 }
 
-.semantic-ai-badge.badge-axiom { background: #01579b; }
-.semantic-ai-badge.badge-claim { background: #e65100; }
-.semantic-ai-badge.badge-evidencebundle { background: #1b5e20; }
-.semantic-ai-badge.badge-relationship { background: #4a148c; }
-.semantic-ai-badge.badge-scientificprocess { background: #880e4f; }
-.semantic-ai-badge.badge-propername { background: #ff6f00; }
-.semantic-ai-badge.badge-wordontology { background: #3e2723; }
 
 .semantic-ai-concept-label {
   flex: 1;
@@ -826,6 +988,8 @@
 }
 
 .semantic-ai-progress-bar {
+  /* The plugin sets --semantic-ai-progress; the width rule lives here. */
+  width: var(--semantic-ai-progress, 0%);
   height: 100%;
   background: var(--interactive-accent);
   transition: width 0.3s ease;
@@ -1188,26 +1352,6 @@
   font-weight: 500;
 }
 
-.type-badge.type-axiom {
-  background: rgba(139, 92, 246, 0.2);
-  color: #8b5cf6;
-}
-
-.type-badge.type-claim {
-  background: rgba(59, 130, 246, 0.2);
-  color: #3b82f6;
-}
-
-.type-badge.type-evidencebundle {
-  background: rgba(16, 185, 129, 0.2);
-  color: #10b981;
-}
-
-.type-badge.type-relationship {
-  background: rgba(245, 158, 11, 0.2);
-  color: #f59e0b;
-}
-
 .type-count {
   opacity: 0.7;
 }
@@ -1303,15 +1447,15 @@
 }
 
 .analysis-section.contradictions h5 {
-  color: #ef4444;
+  color: var(--text-error);
 }
 
 .analysis-section.gaps h5 {
-  color: #f59e0b;
+  color: var(--text-warning);
 }
 
 .analysis-section.suggestions h5 {
-  color: #10b981;
+  color: var(--text-success);
 }
 
 .analysis-section ul {

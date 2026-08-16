@@ -10,7 +10,7 @@
  * 5. Added abort signal support
  */
 
-import { TFile, TFolder, Vault, Notice } from 'obsidian';
+import { TFile, Vault } from 'obsidian';
 import { SemanticTag, TagType } from '../types';
 import { parseTags } from '../tagging/tag-writer';
 import { estimateTokens } from '../ai/prompt-manager';
@@ -102,10 +102,10 @@ export interface IndexCostEstimate {
 /**
  * Sleep helper for batch delays
  */
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
 /**
- * Vault Indexer class - PATCHED
+ * Builds a cross-note index of the tags this plugin has written.
  */
 export class VaultIndexer {
   private vault: Vault;
@@ -189,7 +189,7 @@ export class VaultIndexer {
   }
 
   /**
-   * Build index for folder or vault - PATCHED VERSION
+   * Build a concept index over a folder or the whole vault.
    */
   async buildIndex(
     scope: 'folder' | 'vault',
@@ -242,7 +242,7 @@ export class VaultIndexer {
         }
 
         try {
-          const content = await this.vault.read(file);
+          const content = await this.vault.cachedRead(file);
           const parsedTags = parseTags(content);
           const tags = parsedTags.map(pt => pt.tag);
 
@@ -292,7 +292,8 @@ export class VaultIndexer {
             }
           }
         } catch (err) {
-          console.warn(`Failed to index file ${file.path}:`, err);
+          // One unreadable note should not abandon the whole index.
+          warnings.push(`Could not read ${file.path}`);
         }
       }
 

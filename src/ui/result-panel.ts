@@ -1,161 +1,184 @@
 /**
- * Result Panel Component
- * Displays classification results and batch processing status
+ * Modals shown around a classification run: the preview, the batch runner,
+ * and the category picker.
  */
 
 import { Modal, App, Setting, TFile } from 'obsidian';
-import { ClassificationResult, BatchResult, SemanticTag, TagType, TokenEstimate } from '../types';
+import {
+  CategoryDefinition,
+  ClassificationResult,
+  SemanticAISettings,
+  TagType,
+  TokenEstimate,
+  categoryColor,
+  categoryName
+} from '../types';
 import { getTagCounts } from '../tagging/tag-writer';
 
+const PREVIEW_LIMIT = 12;
+
 /**
- * Classification Result Modal
- * Shows results after AI classification
+ * Shows what the model found and lets the user apply or discard it.
  */
 export class ClassificationResultModal extends Modal {
+  private settings: SemanticAISettings;
   private result: ClassificationResult;
   private filePath: string;
   private onConfirm: () => void;
-  private onCancel: () => void;
 
   constructor(
     app: App,
+    settings: SemanticAISettings,
     result: ClassificationResult,
     filePath: string,
-    onConfirm: () => void,
-    onCancel: () => void
+    onConfirm: () => void
   ) {
     super(app);
+    this.settings = settings;
     this.result = result;
     this.filePath = filePath;
     this.onConfirm = onConfirm;
-    this.onCancel = onCancel;
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, titleEl } = this;
     contentEl.addClass('semantic-ai-result-modal');
 
-    contentEl.createEl('h2', { text: 'Classification Results' });
+    titleEl.setText('Classification results');
+
     contentEl.createEl('p', {
       cls: 'semantic-ai-file-path',
-      text: `File: ${this.filePath}`
+      text: this.filePath
     });
 
-    // Summary
     const counts = getTagCounts(this.result.tags);
-    const summaryEl = contentEl.createEl('div', { cls: 'semantic-ai-result-summary' });
+    const summaryEl = contentEl.createDiv({ cls: 'semantic-ai-result-summary' });
 
-    summaryEl.createEl('h4', { text: `Found ${this.result.tags.length} semantic elements:` });
+    const total = this.result.tags.length;
+    summaryEl.createEl('p', {
+      text: `Found ${total} element${total === 1 ? '' : 's'}:`
+    });
 
     const countsList = summaryEl.createEl('ul');
     for (const [type, count] of Object.entries(counts)) {
-      countsList.createEl('li', { text: `${type}: ${count}` });
+      countsList.createEl('li', {
+        text: `${categoryName(this.settings, type)}: ${count}`
+      });
     }
 
-    // Tag preview
-    if (this.result.tags.length > 0) {
-      const previewEl = contentEl.createEl('div', { cls: 'semantic-ai-tag-preview' });
-      previewEl.createEl('h4', { text: 'Tags Preview:' });
+    if (total > 0) {
+      const previewEl = contentEl.createDiv({ cls: 'semantic-ai-tag-preview' });
+      const previewList = previewEl.createDiv({ cls: 'semantic-ai-preview-list' });
 
-      const previewList = previewEl.createEl('div', { cls: 'semantic-ai-preview-list' });
+      for (const tag of this.result.tags.slice(0, PREVIEW_LIMIT)) {
+        const tagEl = previewList.createDiv({ cls: 'semantic-ai-preview-tag' });
 
-      for (const tag of this.result.tags.slice(0, 10)) {
-        const tagEl = previewList.createEl('div', { cls: 'semantic-ai-preview-tag' });
-        tagEl.createEl('span', {
-          cls: `semantic-ai-tag-type type-${tag.type.toLowerCase()}`,
-          text: tag.type
+        const badge = tagEl.createSpan({
+          cls: 'semantic-ai-tag-type',
+          text: categoryName(this.settings, tag.customType || tag.type)
         });
-        tagEl.createEl('span', {
-          cls: 'semantic-ai-tag-label',
-          text: tag.label
-        });
+        badge.dataset.color = String(categoryColor(this.settings, tag.type));
+
+        tagEl.createSpan({ cls: 'semantic-ai-tag-label', text: tag.label });
+
+        if (tag.topics?.length) {
+          tagEl.createSpan({
+            cls: 'semantic-ai-tag-topics',
+            text: tag.topics.join(', ')
+          });
+        }
       }
 
-      if (this.result.tags.length > 10) {
+      if (total > PREVIEW_LIMIT) {
         previewList.createEl('p', {
           cls: 'semantic-ai-more',
-          text: `... and ${this.result.tags.length - 10} more`
+          text: `… and ${total - PREVIEW_LIMIT} more`
         });
       }
     }
 
-    // Actions
-    const actionsEl = contentEl.createEl('div', { cls: 'semantic-ai-actions' });
-
-    const cancelBtn = actionsEl.createEl('button', { text: 'Cancel' });
-    cancelBtn.onclick = () => {
-      this.onCancel();
-      this.close();
-    };
-
-    const confirmBtn = actionsEl.createEl('button', {
-      cls: 'mod-cta',
-      text: 'Apply Tags'
-    });
-    confirmBtn.onclick = () => {
-      this.onConfirm();
-      this.close();
-    };
+    new Setting(contentEl)
+      .addButton(button => {
+        button
+          .setButtonText('Cancel')
+          .onClick(() => this.close());
+      })
+      .addButton(button => {
+        button
+          .setButtonText('Apply tags')
+          .setCta()
+          .onClick(() => {
+            this.onConfirm();
+            this.close();
+          });
+        // Focus the primary action so the modal is usable from the keyboard.
+        window.setTimeout(() => button.buttonEl.focus(), 0);
+      });
   }
 
   onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.contentEl.empty();
   }
 }
 
 /**
- * Batch Processing Modal
- * Shows progress and results for batch classification
+ * Confirms a batch run, then reports progress while it goes.
  */
 export class BatchProcessingModal extends Modal {
   private files: TFile[];
   private estimate: TokenEstimate;
+  private showEstimate: boolean;
   private onConfirm: () => void;
-  private onCancel: () => void;
+  private onCancelRunCallback: (() => void) | null = null;
+
   private progressEl: HTMLElement | null = null;
   private resultsEl: HTMLElement | null = null;
-  private isProcessing: boolean = false;
+  private startButton: HTMLButtonElement | null = null;
+  private isProcessing = false;
 
   constructor(
     app: App,
     files: TFile[],
     estimate: TokenEstimate,
-    onConfirm: () => void,
-    onCancel: () => void
+    showEstimate: boolean,
+    onConfirm: () => void
   ) {
     super(app);
     this.files = files;
     this.estimate = estimate;
+    this.showEstimate = showEstimate;
     this.onConfirm = onConfirm;
-    this.onCancel = onCancel;
+  }
+
+  /** Register a callback used when the user stops a run mid-way. */
+  onCancelRun(callback: () => void): void {
+    this.onCancelRunCallback = callback;
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, titleEl } = this;
     contentEl.addClass('semantic-ai-batch-modal');
 
-    contentEl.createEl('h2', { text: 'Batch Classification' });
+    titleEl.setText('Classify a folder');
 
-    // File summary
-    const summaryEl = contentEl.createEl('div', { cls: 'semantic-ai-batch-summary' });
-    summaryEl.createEl('p', { text: `Files to process: ${this.files.length}` });
-
-    // Token estimate
-    const estimateEl = contentEl.createEl('div', { cls: 'semantic-ai-estimate' });
-    estimateEl.createEl('h4', { text: 'Estimated Cost:' });
-
-    const estimateList = estimateEl.createEl('ul');
-    estimateList.createEl('li', { text: `Input tokens: ~${this.estimate.inputTokens.toLocaleString()}` });
-    estimateList.createEl('li', { text: `Output tokens: ~${this.estimate.estimatedOutputTokens.toLocaleString()}` });
-    estimateList.createEl('li', {
-      text: `Estimated cost: $${this.estimate.estimatedCost.toFixed(4)}`
+    contentEl.createEl('p', {
+      text: `${this.files.length} note${this.files.length === 1 ? '' : 's'} will be sent to the AI provider, one request each.`
     });
 
-    // File list
-    const fileListEl = contentEl.createEl('div', { cls: 'semantic-ai-file-list' });
-    fileListEl.createEl('h4', { text: 'Files:' });
+    if (this.showEstimate) {
+      const estimateEl = contentEl.createDiv({ cls: 'semantic-ai-estimate' });
+      const estimateList = estimateEl.createEl('ul');
+      estimateList.createEl('li', {
+        text: `Approximate tokens: ${(this.estimate.inputTokens + this.estimate.estimatedOutputTokens).toLocaleString()}`
+      });
+      estimateList.createEl('li', {
+        text: this.estimate.estimatedCost > 0
+          ? `Approximate cost: $${this.estimate.estimatedCost.toFixed(4)} at list prices`
+          : 'No cost estimate available for this model.'
+      });
+    }
 
+    const fileListEl = contentEl.createDiv({ cls: 'semantic-ai-file-list' });
     const list = fileListEl.createEl('ul');
     for (const file of this.files.slice(0, 20)) {
       list.createEl('li', { text: file.path });
@@ -163,58 +186,54 @@ export class BatchProcessingModal extends Modal {
     if (this.files.length > 20) {
       list.createEl('li', {
         cls: 'semantic-ai-more',
-        text: `... and ${this.files.length - 20} more`
+        text: `… and ${this.files.length - 20} more`
       });
     }
 
-    // Progress section (hidden initially)
-    this.progressEl = contentEl.createEl('div', {
-      cls: 'semantic-ai-progress hidden'
-    });
-    this.progressEl.createEl('h4', { text: 'Progress:' });
+    this.progressEl = contentEl.createDiv({ cls: 'semantic-ai-progress hidden' });
+    this.resultsEl = this.progressEl.createDiv({ cls: 'semantic-ai-progress-results' });
+    // Announce each file as it finishes for screen reader users.
+    this.resultsEl.setAttribute('role', 'log');
+    this.resultsEl.setAttribute('aria-live', 'polite');
+    this.resultsEl.setAttribute('aria-label', 'Batch progress');
 
-    this.resultsEl = this.progressEl.createEl('div', {
-      cls: 'semantic-ai-progress-results'
-    });
-
-    // Actions
-    const actionsEl = contentEl.createEl('div', { cls: 'semantic-ai-actions' });
-
-    const cancelBtn = actionsEl.createEl('button', { text: 'Cancel' });
-    cancelBtn.onclick = () => {
-      if (!this.isProcessing) {
-        this.onCancel();
-        this.close();
-      }
-    };
-
-    const confirmBtn = actionsEl.createEl('button', {
-      cls: 'mod-cta',
-      text: 'Start Processing'
-    });
-    confirmBtn.onclick = () => {
-      if (!this.isProcessing) {
-        this.isProcessing = true;
-        this.progressEl?.removeClass('hidden');
-        confirmBtn.disabled = true;
-        confirmBtn.textContent = 'Processing...';
-        this.onConfirm();
-      }
-    };
+    new Setting(contentEl)
+      .addButton(button => {
+        button
+          .setButtonText('Cancel')
+          .onClick(() => {
+            if (this.isProcessing) {
+              this.onCancelRunCallback?.();
+              button.setButtonText('Stopping…');
+              button.setDisabled(true);
+            } else {
+              this.close();
+            }
+          });
+      })
+      .addButton(button => {
+        this.startButton = button.buttonEl;
+        button
+          .setButtonText('Start')
+          .setCta()
+          .onClick(() => {
+            if (this.isProcessing) {
+              return;
+            }
+            this.isProcessing = true;
+            this.progressEl?.removeClass('hidden');
+            button.setDisabled(true);
+            button.setButtonText('Working…');
+            this.onConfirm();
+          });
+      });
   }
 
-  /**
-   * Update progress display
-   */
   updateProgress(file: string, status: string, counts?: Record<string, number>): void {
     if (!this.resultsEl) return;
 
-    const itemEl = this.resultsEl.createEl('div', { cls: 'semantic-ai-progress-item' });
-
-    const statusIcon = status === 'complete' ? '✅' : status === 'processing' ? '📄' : '❌';
-    itemEl.createEl('span', { text: statusIcon });
-
-    itemEl.createEl('span', {
+    const itemEl = this.resultsEl.createDiv({ cls: 'semantic-ai-progress-item' });
+    itemEl.createSpan({
       cls: 'semantic-ai-progress-file',
       text: file.split('/').pop() || file
     });
@@ -224,228 +243,130 @@ export class BatchProcessingModal extends Modal {
         .map(([type, count]) => `${count} ${type}`)
         .join(', ');
 
-      itemEl.createEl('span', {
+      itemEl.createSpan({
         cls: 'semantic-ai-progress-counts',
-        text: countsText
+        text: countsText || 'nothing found'
       });
-    } else if (status !== 'complete' && status !== 'processing') {
-      itemEl.createEl('span', {
-        cls: 'semantic-ai-progress-error',
-        text: status
-      });
+    } else if (status === 'processing') {
+      itemEl.createSpan({ cls: 'semantic-ai-progress-counts', text: 'working…' });
+    } else {
+      itemEl.createSpan({ cls: 'semantic-ai-progress-error', text: status });
     }
 
-    // Auto-scroll
     this.resultsEl.scrollTop = this.resultsEl.scrollHeight;
   }
 
-  /**
-   * Mark processing as complete
-   */
   complete(totalTags: number): void {
     this.isProcessing = false;
 
-    if (this.progressEl) {
-      this.progressEl.createEl('div', {
-        cls: 'semantic-ai-complete',
-        text: `✨ Processing complete! Total tags created: ${totalTags}`
-      });
-    }
+    this.progressEl?.createEl('p', {
+      cls: 'semantic-ai-complete',
+      text: `Done. ${totalTags} tag${totalTags === 1 ? '' : 's'} written.`
+    });
 
-    // Update button
-    const confirmBtn = this.contentEl.querySelector('.mod-cta');
-    if (confirmBtn) {
-      confirmBtn.textContent = 'Done';
-      (confirmBtn as HTMLButtonElement).disabled = false;
-      (confirmBtn as HTMLButtonElement).onclick = () => this.close();
+    if (this.startButton) {
+      this.startButton.disabled = false;
+      this.startButton.setText('Close');
+      this.startButton.addEventListener('click', () => this.close());
+      this.startButton.focus();
     }
   }
 
   onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.contentEl.empty();
   }
 }
 
 /**
- * Token Estimate Modal
- * Shows cost estimate before processing
- */
-export class TokenEstimateModal extends Modal {
-  private estimate: TokenEstimate;
-  private fileCount: number;
-  private onConfirm: () => void;
-  private onCancel: () => void;
-
-  constructor(
-    app: App,
-    estimate: TokenEstimate,
-    fileCount: number,
-    onConfirm: () => void,
-    onCancel: () => void
-  ) {
-    super(app);
-    this.estimate = estimate;
-    this.fileCount = fileCount;
-    this.onConfirm = onConfirm;
-    this.onCancel = onCancel;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.addClass('semantic-ai-estimate-modal');
-
-    contentEl.createEl('h2', { text: 'Cost Estimate' });
-
-    const infoEl = contentEl.createEl('div', { cls: 'semantic-ai-estimate-info' });
-
-    new Setting(infoEl)
-      .setName('Files to process')
-      .setDesc(String(this.fileCount));
-
-    new Setting(infoEl)
-      .setName('Estimated input tokens')
-      .setDesc(`~${this.estimate.inputTokens.toLocaleString()}`);
-
-    new Setting(infoEl)
-      .setName('Estimated output tokens')
-      .setDesc(`~${this.estimate.estimatedOutputTokens.toLocaleString()}`);
-
-    new Setting(infoEl)
-      .setName('Estimated cost')
-      .setDesc(`$${this.estimate.estimatedCost.toFixed(4)}`);
-
-    contentEl.createEl('p', {
-      cls: 'semantic-ai-estimate-note',
-      text: 'Note: Actual costs may vary based on content complexity and model response.'
-    });
-
-    // Actions
-    const actionsEl = contentEl.createEl('div', { cls: 'semantic-ai-actions' });
-
-    const cancelBtn = actionsEl.createEl('button', { text: 'Cancel' });
-    cancelBtn.onclick = () => {
-      this.onCancel();
-      this.close();
-    };
-
-    const confirmBtn = actionsEl.createEl('button', {
-      cls: 'mod-cta',
-      text: 'Proceed'
-    });
-    confirmBtn.onclick = () => {
-      this.onConfirm();
-      this.close();
-    };
-  }
-
-  onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-  }
-}
-
-/**
- * Tag Selection Modal
- * Allows user to select which tag types to classify
+ * Lets the user pick which categories a single run should look for.
  */
 export class TagSelectionModal extends Modal {
-  private selectedTypes: Set<TagType>;
+  private categories: CategoryDefinition[];
+  private selected: Set<TagType>;
   private onConfirm: (types: TagType[]) => void;
-  private onCancel: () => void;
-
-  private allTypes: TagType[] = [
-    'Axiom', 'Claim', 'EvidenceBundle', 'ScientificProcess',
-    'Relationship', 'InternalLink', 'ExternalLink', 'ProperName',
-    'ForwardLink', 'WordOntology', 'Sentence', 'Paragraph'
-  ];
 
   constructor(
     app: App,
+    categories: CategoryDefinition[],
     defaultTypes: TagType[],
-    onConfirm: (types: TagType[]) => void,
-    onCancel: () => void
+    onConfirm: (types: TagType[]) => void
   ) {
     super(app);
-    this.selectedTypes = new Set(defaultTypes);
+    this.categories = categories;
+    this.selected = new Set(defaultTypes);
     this.onConfirm = onConfirm;
-    this.onCancel = onCancel;
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, titleEl } = this;
     contentEl.addClass('semantic-ai-selection-modal');
 
-    contentEl.createEl('h2', { text: 'Select Tag Types' });
-    contentEl.createEl('p', { text: 'Choose which semantic elements to identify:' });
+    titleEl.setText('Choose categories');
 
-    // Type checkboxes
-    const typesEl = contentEl.createEl('div', { cls: 'semantic-ai-type-selection' });
+    if (this.categories.length === 0) {
+      contentEl.createEl('p', {
+        text: 'No categories are defined. Add some in the plugin settings.'
+      });
+      return;
+    }
 
-    for (const type of this.allTypes) {
+    const typesEl = contentEl.createDiv({ cls: 'semantic-ai-type-selection' });
+    const toggles = new Map<TagType, (value: boolean) => void>();
+
+    for (const category of this.categories) {
       new Setting(typesEl)
-        .setName(type)
+        .setName(category.name)
+        .setDesc(category.prompt.slice(0, 120) + (category.prompt.length > 120 ? '…' : ''))
         .addToggle(toggle => {
           toggle
-            .setValue(this.selectedTypes.has(type))
+            .setValue(this.selected.has(category.id))
             .onChange(value => {
               if (value) {
-                this.selectedTypes.add(type);
+                this.selected.add(category.id);
               } else {
-                this.selectedTypes.delete(type);
+                this.selected.delete(category.id);
               }
             });
+
+          toggles.set(category.id, (value: boolean) => toggle.setValue(value));
         });
     }
 
-    // Quick actions
-    const quickEl = contentEl.createEl('div', { cls: 'semantic-ai-quick-actions' });
-
-    const selectAllBtn = quickEl.createEl('button', { text: 'Select All' });
-    selectAllBtn.onclick = () => {
-      this.selectedTypes = new Set(this.allTypes);
-      this.close();
-      this.open();
-    };
-
-    const selectNoneBtn = quickEl.createEl('button', { text: 'Clear All' });
-    selectNoneBtn.onclick = () => {
-      this.selectedTypes.clear();
-      this.close();
-      this.open();
-    };
-
-    const academicBtn = quickEl.createEl('button', { text: 'Academic Set' });
-    academicBtn.onclick = () => {
-      this.selectedTypes = new Set(['Axiom', 'Claim', 'EvidenceBundle', 'Relationship']);
-      this.close();
-      this.open();
-    };
-
-    // Actions
-    const actionsEl = contentEl.createEl('div', { cls: 'semantic-ai-actions' });
-
-    const cancelBtn = actionsEl.createEl('button', { text: 'Cancel' });
-    cancelBtn.onclick = () => {
-      this.onCancel();
-      this.close();
-    };
-
-    const confirmBtn = actionsEl.createEl('button', {
-      cls: 'mod-cta',
-      text: 'Classify'
-    });
-    confirmBtn.onclick = () => {
-      if (this.selectedTypes.size === 0) {
-        return;
+    const setAll = (value: boolean): void => {
+      for (const category of this.categories) {
+        if (value) {
+          this.selected.add(category.id);
+        } else {
+          this.selected.delete(category.id);
+        }
+        toggles.get(category.id)?.(value);
       }
-      this.onConfirm(Array.from(this.selectedTypes));
-      this.close();
     };
+
+    new Setting(contentEl)
+      .addButton(button => button.setButtonText('Select all').onClick(() => setAll(true)))
+      .addButton(button => button.setButtonText('Clear all').onClick(() => setAll(false)));
+
+    new Setting(contentEl)
+      .addButton(button => {
+        button.setButtonText('Cancel').onClick(() => this.close());
+      })
+      .addButton(button => {
+        button
+          .setButtonText('Classify')
+          .setCta()
+          .onClick(() => {
+            if (this.selected.size === 0) {
+              return;
+            }
+            this.onConfirm(Array.from(this.selected));
+            this.close();
+          });
+        window.setTimeout(() => button.buttonEl.focus(), 0);
+      });
   }
 
   onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.contentEl.empty();
   }
 }

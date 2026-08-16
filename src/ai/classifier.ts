@@ -1,9 +1,9 @@
 /**
- * AI Classifier Module
- * Handles AI-based classification of notes
+ * AI Classifier
+ * Talks to the configured provider and turns its answer into semantic tags.
  */
 
-import { requestUrl, RequestUrlParam, Notice } from 'obsidian';
+import { requestUrl, RequestUrlParam } from 'obsidian';
 import {
   SemanticTag,
   TagType,
@@ -11,16 +11,36 @@ import {
   ClassificationResult,
   AIClassificationResponse,
   SemanticAISettings,
+  ProviderConfig,
+  ProviderId,
+  PROVIDERS,
   TokenEstimate,
-  CKG_TYPES,
-  ALL_DOMAINS
+  enabledCategoryIds,
+  enabledTopics,
+  topicsActive
 } from '../types';
-import { PromptManager, estimateTokens, estimatePromptTokens, estimateCost } from './prompt-manager';
+import { PromptManager, estimatePromptTokens, estimateCost } from './prompt-manager';
 import { createTag } from '../tagging/tag-writer';
 
-/**
- * AI Classifier class for handling all AI classification operations
- */
+/** Resolved connection details for the provider that is currently selected. */
+export function activeProvider(settings: SemanticAISettings): {
+  id: ProviderId;
+  config: ProviderConfig;
+  endpoint: string;
+  model: string;
+} {
+  const id = settings.provider;
+  const info = PROVIDERS[id] || PROVIDERS.openai;
+  const config = settings.providers?.[id] || { apiKey: '', endpoint: '', model: '' };
+
+  return {
+    id,
+    config,
+    endpoint: config.endpoint || info.defaultEndpoint,
+    model: config.model || info.defaultModel
+  };
+}
+
 export class AIClassifier {
   private settings: SemanticAISettings;
   private promptManager: PromptManager;
@@ -30,63 +50,48 @@ export class AIClassifier {
     this.promptManager = promptManager;
   }
 
-  /**
-   * Update settings reference
-   */
   updateSettings(settings: SemanticAISettings): void {
     this.settings = settings;
     this.promptManager.updateSettings(settings);
   }
 
   /**
-   * Classify content using AI
+   * Classify content across a set of categories. Defaults to whichever
+   * categories the user has enabled.
    */
   async classify(
     content: string,
-    types: TagType[] = CKG_TYPES,
+    types?: TagType[],
     sourceFile?: string
   ): Promise<ClassificationResult> {
-    const prompt = this.promptManager.buildClassificationPrompt(content, types);
+    const selected = types && types.length > 0 ? types : enabledCategoryIds(this.settings);
+    const prompt = this.promptManager.buildClassificationPrompt(content, selected);
 
-    try {
-      const response = await this.callAI(prompt);
-      const parsed = this.parseAIResponse(response);
-      const tags = this.convertToTags(parsed, sourceFile);
+    const response = await this.complete(prompt);
+    const parsed = this.parseAIResponse(response);
+    const tags = this.convertToTags(parsed, sourceFile);
 
-      return {
-        tags,
-        summary: `Found ${tags.length} semantic elements`
-      };
-    } catch (error) {
-      console.error('Classification error:', error);
-      throw new Error(`Classification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+    return {
+      tags,
+      summary: `Found ${tags.length} element${tags.length === 1 ? '' : 's'}`
+    };
   }
 
-  /**
-   * Classify content for a single tag type
-   */
+  /** Classify content for a single category. */
   async classifySingleType(content: string, type: TagType, sourceFile?: string): Promise<ClassificationResult> {
     const prompt = this.promptManager.buildSingleTypePrompt(content, type);
 
-    try {
-      const response = await this.callAI(prompt);
-      const parsed = this.parseAIResponse(response);
-      const tags = this.convertToTags(parsed, sourceFile);
+    const response = await this.complete(prompt);
+    const parsed = this.parseAIResponse(response);
+    const tags = this.convertToTags(parsed, sourceFile);
 
-      return {
-        tags,
-        summary: `Found ${tags.length} ${this.promptManager.getTagTypeName(type)}`
-      };
-    } catch (error) {
-      console.error('Classification error:', error);
-      throw new Error(`Classification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+    return {
+      tags,
+      summary: `Found ${tags.length} ${this.promptManager.getTagTypeName(type).toLowerCase()}`
+    };
   }
 
-  /**
-   * Run custom classifier
-   */
+  /** Run a custom classifier by keyword. */
   async classifyCustom(content: string, keyword: string, sourceFile?: string): Promise<ClassificationResult> {
     const classifier = this.promptManager.findClassifierByKeyword(keyword);
 
@@ -96,201 +101,202 @@ export class AIClassifier {
 
     const prompt = this.promptManager.buildCustomClassifierPrompt(content, classifier);
 
-    try {
-      const response = await this.callAI(prompt);
-      const parsed = this.parseAIResponse(response);
-      const tags = this.convertToTags(parsed, sourceFile);
+    const response = await this.complete(prompt);
+    const parsed = this.parseAIResponse(response);
+    const tags = this.convertToTags(parsed, sourceFile);
 
-      return {
-        tags,
-        summary: `Found ${tags.length} '${keyword}' elements`
-      };
-    } catch (error) {
-      console.error('Custom classification error:', error);
-      throw new Error(`Custom classification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+    return {
+      tags,
+      summary: `Found ${tags.length} '${keyword}' element${tags.length === 1 ? '' : 's'}`
+    };
   }
 
-  /**
-   * Estimate tokens and cost for classification
-   */
+  /** Estimate tokens and cost for a classification run. */
   estimateClassification(content: string, types: TagType[]): TokenEstimate {
     const prompt = this.promptManager.buildClassificationPrompt(content, types);
     const inputTokens = estimatePromptTokens(prompt, '');
 
-    // Estimate output tokens (roughly 20% of input for classification)
+    // Classification output runs roughly a fifth of the input.
     const estimatedOutputTokens = Math.ceil(inputTokens * 0.2);
+    const { model } = activeProvider(this.settings);
 
     return {
       inputTokens,
       estimatedOutputTokens,
-      estimatedCost: estimateCost(inputTokens, estimatedOutputTokens, this.settings.modelName)
+      estimatedCost: estimateCost(inputTokens, estimatedOutputTokens, model)
     };
   }
 
+  /* ---------------------------------------------------------------------- */
+  /* Provider transport                                                     */
+  /* ---------------------------------------------------------------------- */
+
   /**
-   * Call AI provider API
+   * Send a prompt to the active provider and return the raw text reply.
+   * Public so other features can reuse the same transport and credentials.
    */
-  private async callAI(prompt: string): Promise<string> {
-    if (!this.settings.apiKey && this.settings.aiProvider !== 'ollama') {
-      throw new Error('API key not configured. Please add your API key in settings.');
+  async complete(prompt: string, maxTokens = 4096): Promise<string> {
+    const { id, config, endpoint, model } = activeProvider(this.settings);
+    const info = PROVIDERS[id] || PROVIDERS.openai;
+
+    if (info.requiresKey && !config.apiKey) {
+      throw new Error(`No API key set for ${info.name}. Add one in the plugin settings.`);
     }
 
-    switch (this.settings.aiProvider) {
-      case 'openai':
-        return this.callOpenAI(prompt);
+    if (!endpoint) {
+      throw new Error(`No endpoint set for ${info.name}. Add one in the plugin settings.`);
+    }
+
+    switch (info.wireFormat) {
       case 'anthropic':
-        return this.callAnthropic(prompt);
+        return this.callAnthropic(endpoint, config.apiKey, model, prompt, maxTokens);
       case 'ollama':
-        return this.callOllama(prompt);
-      case 'custom':
-        return this.callCustomAPI(prompt);
+        return this.callOllama(endpoint, model, prompt);
+      case 'openai':
       default:
-        throw new Error(`Unknown AI provider: ${this.settings.aiProvider}`);
+        return this.callOpenAICompatible(endpoint, config.apiKey, model, prompt, maxTokens, info.name);
     }
   }
 
-  /**
-   * Call OpenAI API
-   */
-  private async callOpenAI(prompt: string): Promise<string> {
+  /** OpenAI, DeepSeek, and any other chat-completions-compatible endpoint. */
+  private async callOpenAICompatible(
+    endpoint: string,
+    apiKey: string,
+    model: string,
+    prompt: string,
+    maxTokens: number,
+    providerName: string
+  ): Promise<string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
     const requestParams: RequestUrlParam = {
-      url: this.settings.apiEndpoint || 'https://api.openai.com/v1/chat/completions',
+      url: endpoint,
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.settings.apiKey}`
-      },
+      headers,
       body: JSON.stringify({
-        model: this.settings.modelName || 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
+        model,
+        messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
-        max_tokens: 4096
-      })
+        max_tokens: maxTokens
+      }),
+      throw: false
     };
 
     const response = await requestUrl(requestParams);
 
     if (response.status !== 200) {
-      throw new Error(`OpenAI API error: ${response.status} - ${response.text}`);
+      throw new Error(`${providerName} error ${response.status}: ${this.errorDetail(response.text)}`);
     }
 
     const data = response.json;
-    return data.choices[0]?.message?.content || '';
+    const text = data?.choices?.[0]?.message?.content;
+
+    if (typeof text !== 'string') {
+      throw new Error(`${providerName} returned an unexpected response shape.`);
+    }
+
+    return text;
   }
 
-  /**
-   * Call Anthropic API
-   */
-  private async callAnthropic(prompt: string): Promise<string> {
+  private async callAnthropic(
+    endpoint: string,
+    apiKey: string,
+    model: string,
+    prompt: string,
+    maxTokens: number
+  ): Promise<string> {
     const requestParams: RequestUrlParam = {
-      url: 'https://api.anthropic.com/v1/messages',
+      url: endpoint,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': this.settings.apiKey,
+        'x-api-key': apiKey,
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: this.settings.modelName || 'claude-3-haiku-20240307',
-        max_tokens: 4096,
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ]
-      })
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      throw: false
     };
 
     const response = await requestUrl(requestParams);
 
     if (response.status !== 200) {
-      throw new Error(`Anthropic API error: ${response.status} - ${response.text}`);
+      throw new Error(`Anthropic error ${response.status}: ${this.errorDetail(response.text)}`);
     }
 
     const data = response.json;
-    return data.content[0]?.text || '';
+    const text = data?.content?.[0]?.text;
+
+    if (typeof text !== 'string') {
+      throw new Error('Anthropic returned an unexpected response shape.');
+    }
+
+    return text;
   }
 
-  /**
-   * Call Ollama API (local)
-   */
-  private async callOllama(prompt: string): Promise<string> {
+  private async callOllama(endpoint: string, model: string, prompt: string): Promise<string> {
     const requestParams: RequestUrlParam = {
-      url: this.settings.apiEndpoint || 'http://localhost:11434/api/generate',
+      url: endpoint,
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: this.settings.modelName || 'llama2',
-        prompt: prompt,
-        stream: false
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt, stream: false }),
+      throw: false
     };
 
     const response = await requestUrl(requestParams);
 
     if (response.status !== 200) {
-      throw new Error(`Ollama API error: ${response.status} - ${response.text}`);
+      throw new Error(`Ollama error ${response.status}: ${this.errorDetail(response.text)}`);
     }
 
     const data = response.json;
-    return data.response || '';
-  }
 
-  /**
-   * Call custom API endpoint
-   */
-  private async callCustomAPI(prompt: string): Promise<string> {
-    if (!this.settings.apiEndpoint) {
-      throw new Error('Custom API endpoint not configured');
+    if (typeof data?.response !== 'string') {
+      throw new Error('Ollama returned an unexpected response shape.');
     }
 
-    const requestParams: RequestUrlParam = {
-      url: this.settings.apiEndpoint,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(this.settings.apiKey && { 'Authorization': `Bearer ${this.settings.apiKey}` })
-      },
-      body: JSON.stringify({
-        prompt: prompt,
-        model: this.settings.modelName
-      })
-    };
-
-    const response = await requestUrl(requestParams);
-
-    if (response.status !== 200) {
-      throw new Error(`Custom API error: ${response.status} - ${response.text}`);
-    }
-
-    const data = response.json;
-    // Try common response formats
-    return data.response || data.content || data.text || data.output || JSON.stringify(data);
+    return data.response;
   }
 
-  /**
-   * Parse AI response into structured data
-   */
+  /** Pull a readable message out of an error body without dumping the whole payload. */
+  private errorDetail(body: string): string {
+    if (!body) {
+      return 'no response body';
+    }
+
+    try {
+      const parsed = JSON.parse(body);
+      const message = parsed?.error?.message || parsed?.error || parsed?.message;
+      if (typeof message === 'string') {
+        return message;
+      }
+    } catch {
+      // Not JSON — fall through to the truncated raw body.
+    }
+
+    return body.length > 300 ? `${body.slice(0, 300)}…` : body;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Response handling                                                      */
+  /* ---------------------------------------------------------------------- */
+
   private parseAIResponse(response: string): AIClassificationResponse[] {
-    // Try to extract JSON from the response
     let jsonStr = response.trim();
 
-    // Handle markdown code blocks
+    // Strip a markdown code fence if the model wrapped its answer in one.
     const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (jsonMatch) {
       jsonStr = jsonMatch[1].trim();
     }
 
-    // Handle responses that start with text before JSON
+    // Drop any prose before or after the array.
     const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (arrayMatch) {
       jsonStr = arrayMatch[0];
@@ -298,17 +304,9 @@ export class AIClassifier {
 
     try {
       const parsed = JSON.parse(jsonStr);
-
-      if (!Array.isArray(parsed)) {
-        // If single object, wrap in array
-        return [parsed];
-      }
-
-      return parsed;
-    } catch (error) {
-      console.error('Failed to parse AI response:', response);
-
-      // Try to salvage partial JSON
+      return Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      // Salvage whatever complete objects are in there.
       const partialMatch = jsonStr.match(/\{[^{}]*\}/g);
       if (partialMatch) {
         const results: AIClassificationResponse[] = [];
@@ -316,7 +314,7 @@ export class AIClassifier {
           try {
             results.push(JSON.parse(match));
           } catch {
-            // Skip invalid entries
+            // Skip entries that are still malformed.
           }
         }
         if (results.length > 0) {
@@ -324,28 +322,29 @@ export class AIClassifier {
         }
       }
 
-      throw new Error('Failed to parse AI response as JSON');
+      throw new Error('The model did not return valid JSON. Try a different model, or a smaller note.');
     }
   }
 
-  /**
-   * Convert AI responses to semantic tags
-   */
   private convertToTags(responses: AIClassificationResponse[], sourceFile?: string): SemanticTag[] {
     const tags: SemanticTag[] = [];
     const labelToUuid = new Map<string, string>();
+    const validTopics = new Set(enabledTopics(this.settings).map(t => t.id));
+    const wantTopics = topicsActive(this.settings);
 
-    // First pass: create all tags
+    // First pass: create the tags.
+    const accepted: AIClassificationResponse[] = [];
+
     for (const response of responses) {
       if (!response.type || !response.label) {
         continue;
       }
 
       const tag = createTag(
-        response.type as TagType,
+        response.type,
         response.label,
         null,
-        response.type === 'Custom' ? (response as { customType?: string }).customType : undefined,
+        response.type === 'Custom' ? response.customType : undefined,
         sourceFile
       );
 
@@ -353,64 +352,78 @@ export class AIClassifier {
         tag.metadata = response.metadata;
       }
 
-      // CKG Axis 2: attach validated domain resonance
-      if (response.domains && Array.isArray(response.domains)) {
-        tag.domains = response.domains.filter(
-          (d): d is Domain => ALL_DOMAINS.includes(d as Domain)
-        );
+      if (wantTopics) {
+        const claimed = response.topics || response.domains;
+        if (Array.isArray(claimed)) {
+          const kept = claimed.filter((d): d is Domain => typeof d === 'string' && validTopics.has(d));
+          if (kept.length > 0) {
+            tag.topics = kept;
+          }
+        }
       }
 
       tags.push(tag);
+      accepted.push(response);
       labelToUuid.set(response.label, tag.uuid);
     }
 
-    // Second pass: link parent references
-    for (let i = 0; i < responses.length; i++) {
-      const response = responses[i];
-      if (response.parentLabel && labelToUuid.has(response.parentLabel)) {
-        tags[i].parentUuid = labelToUuid.get(response.parentLabel) || null;
+    // Second pass: resolve parent references now that every label has a UUID.
+    for (let i = 0; i < accepted.length; i++) {
+      const parentLabel = accepted[i].parentLabel;
+      if (parentLabel && labelToUuid.has(parentLabel)) {
+        const parentUuid = labelToUuid.get(parentLabel) || null;
+        // Don't let an element be its own parent.
+        if (parentUuid !== tags[i].uuid) {
+          tags[i].parentUuid = parentUuid;
+        }
       }
     }
 
     return tags;
   }
 
-  /**
-   * Validate API configuration
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Configuration                                                          */
+  /* ---------------------------------------------------------------------- */
+
   validateConfiguration(): { valid: boolean; error?: string } {
-    if (this.settings.aiProvider === 'ollama') {
-      return { valid: true };
+    const { id, config, endpoint } = activeProvider(this.settings);
+    const info = PROVIDERS[id] || PROVIDERS.openai;
+
+    if (info.requiresKey && !config.apiKey) {
+      return { valid: false, error: `no API key set for ${info.name}` };
     }
 
-    if (!this.settings.apiKey) {
-      return { valid: false, error: 'API key is required' };
+    if (!endpoint) {
+      return { valid: false, error: `no endpoint set for ${info.name}` };
     }
 
-    if (this.settings.aiProvider === 'custom' && !this.settings.apiEndpoint) {
-      return { valid: false, error: 'Custom API endpoint is required' };
+    if (this.settings.categories.length === 0) {
+      return { valid: false, error: 'no categories defined' };
     }
 
     return { valid: true };
   }
 
-  /**
-   * Test API connection
-   */
+  /** Round-trip a tiny prompt so the user can check credentials from settings. */
   async testConnection(): Promise<{ success: boolean; message: string }> {
     const validation = this.validateConfiguration();
     if (!validation.valid) {
-      return { success: false, message: validation.error || 'Invalid configuration' };
+      return { success: false, message: `Cannot connect: ${validation.error}.` };
     }
 
     try {
-      const response = await this.callAI('Respond with exactly: {"test": "success"}');
+      const response = await this.complete('Respond with exactly: {"test": "success"}', 64);
+      const { id, model } = activeProvider(this.settings);
 
       if (response.includes('success')) {
-        return { success: true, message: 'Connection successful!' };
+        return { success: true, message: `Connected to ${PROVIDERS[id].name} using ${model}.` };
       }
 
-      return { success: true, message: 'Connection established, but response format may vary.' };
+      return {
+        success: true,
+        message: `Connected to ${PROVIDERS[id].name}, but ${model} replied in an unexpected format.`
+      };
     } catch (error) {
       return {
         success: false,
@@ -421,11 +434,12 @@ export class AIClassifier {
 }
 
 /**
- * Batch classifier for processing multiple files
+ * Batch classifier for processing multiple files.
  */
 export class BatchClassifier {
   private classifier: AIClassifier;
   private onProgress: (file: string, status: string, counts?: Record<string, number>) => void;
+  private cancelled = false;
 
   constructor(
     classifier: AIClassifier,
@@ -435,9 +449,11 @@ export class BatchClassifier {
     this.onProgress = onProgress;
   }
 
-  /**
-   * Process multiple files
-   */
+  /** Stop after the file currently in flight. */
+  cancel(): void {
+    this.cancelled = true;
+  }
+
   async processFiles(
     files: { path: string; content: string }[],
     types: TagType[]
@@ -445,6 +461,10 @@ export class BatchClassifier {
     const results = new Map<string, ClassificationResult>();
 
     for (const file of files) {
+      if (this.cancelled) {
+        break;
+      }
+
       this.onProgress(file.path, 'processing');
 
       try {
@@ -462,35 +482,26 @@ export class BatchClassifier {
         results.set(file.path, { tags: [], summary: 'Classification failed' });
       }
 
-      // Add delay between requests to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Space requests out so providers don't rate-limit the batch.
+      await new Promise(resolve => window.setTimeout(resolve, 500));
     }
 
     return results;
   }
 
-  /**
-   * Estimate total cost for batch processing
-   */
   estimateBatchCost(
     files: { content: string }[],
     types: TagType[]
   ): { totalTokens: number; estimatedCost: number } {
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
+    let totalTokens = 0;
+    let estimatedCost = 0;
 
     for (const file of files) {
       const estimate = this.classifier.estimateClassification(file.content, types);
-      totalInputTokens += estimate.inputTokens;
-      totalOutputTokens += estimate.estimatedOutputTokens;
+      totalTokens += estimate.inputTokens + estimate.estimatedOutputTokens;
+      estimatedCost += estimate.estimatedCost;
     }
 
-    return {
-      totalTokens: totalInputTokens + totalOutputTokens,
-      estimatedCost: files.reduce((sum, file) => {
-        const estimate = this.classifier.estimateClassification(file.content, types);
-        return sum + estimate.estimatedCost;
-      }, 0)
-    };
+    return { totalTokens, estimatedCost };
   }
 }

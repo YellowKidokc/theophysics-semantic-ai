@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   Obsidian Semantic AI Plugin - Installer
+echo   Semantic AI - Installer
 echo   Built with Claude (Anthropic)
 echo ============================================
 echo.

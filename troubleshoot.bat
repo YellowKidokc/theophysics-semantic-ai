@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   Obsidian Semantic AI - Troubleshooter
+echo   Semantic AI - Troubleshooter
 echo   Built with Claude (Anthropic)
 echo ============================================
 echo.
@@ -165,7 +165,7 @@ echo ============================================
 echo.
 echo Package info:
 if exist "package.json" (
-    echo Name: obsidian-semantic-ai
+    echo Name: semantic-ai
     for /f "tokens=2 delims=:," %%a in ('findstr "version" package.json') do echo Version:%%a
 )
 echo.

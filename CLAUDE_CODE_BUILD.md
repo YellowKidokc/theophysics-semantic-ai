@@ -28,7 +28,7 @@ npm run build
 ## Deploy to Vault
 ```powershell
 # Target plugin folder (re-enable after disabled)
-$target = "O:\Theophysics_Master\THEOPHYSICS\.obsidian\plugins\obsidian-semantic-ai"
+$target = "O:\Theophysics_Master\THEOPHYSICS\.obsidian\plugins\semantic-ai"
 
 # Create if needed
 New-Item -ItemType Directory -Force -Path $target

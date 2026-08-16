@@ -3,10 +3,10 @@
  * Track the evolution of a concept across documents with AI analysis
  */
 
-import { ItemView, WorkspaceLeaf, setIcon } from 'obsidian';
-import { SemanticTag, TagType } from '../types';
+import { ItemView, WorkspaceLeaf } from 'obsidian';
+import { SemanticTag, TagType, hashToColorSlot } from '../types';
 import { VaultIndex } from '../indexing/vault-indexer';
-import { ConceptRegistry, ConceptRegistryEntry } from '../tagging/concept-registry';
+import { ConceptRegistry } from '../tagging/concept-registry';
 
 export const CONCEPT_JOURNEY_VIEW_TYPE = 'concept-journey-view';
 
@@ -100,9 +100,9 @@ export class ConceptJourneyView extends ItemView {
   private renderView(): void {
     // Header
     const header = this.container.createEl('div', { cls: 'journey-header' });
-    header.createEl('h3', { text: 'Concept Journey' });
+    header.createEl('h3', { text: 'Concept journey' });
     header.createEl('p', {
-      text: 'Track how a concept evolves across your documents',
+      text: 'See how one concept develops across your notes',
       cls: 'journey-subtitle'
     });
 
@@ -112,7 +112,7 @@ export class ConceptJourneyView extends ItemView {
     const searchRow = searchSection.createEl('div', { cls: 'journey-search-row' });
     this.searchInput = searchRow.createEl('input', {
       type: 'text',
-      placeholder: 'Enter concept (e.g., "consciousness")',
+      placeholder: 'Concept to trace',
       cls: 'journey-search-input'
     });
 
@@ -133,7 +133,7 @@ export class ConceptJourneyView extends ItemView {
     // Journey timeline container
     this.journeyContainer = this.container.createEl('div', { cls: 'journey-timeline-container' });
     this.journeyContainer.createEl('div', {
-      text: 'Search for a concept to see its journey across your vault',
+      text: 'Search for a concept to see where it appears and how it develops.',
       cls: 'journey-placeholder'
     });
 
@@ -151,7 +151,7 @@ export class ConceptJourneyView extends ItemView {
     aliasHeader.createEl('span', { text: 'Aliases:', cls: 'alias-label' });
 
     const addAliasBtn = aliasHeader.createEl('button', {
-      text: '+ Add Alias',
+      text: 'Add alias',
       cls: 'alias-add-btn'
     });
     addAliasBtn.addEventListener('click', () => this.showAddAliasInput());
@@ -190,7 +190,7 @@ export class ConceptJourneyView extends ItemView {
 
     const input = inputRow.createEl('input', {
       type: 'text',
-      placeholder: 'Enter alias...',
+      placeholder: 'Alias',
       cls: 'alias-input'
     });
 
@@ -229,7 +229,7 @@ export class ConceptJourneyView extends ItemView {
 
     this.journeyContainer.empty();
     this.journeyContainer.createEl('div', {
-      text: 'Searching...',
+      text: 'Searching…',
       cls: 'journey-loading'
     });
 
@@ -340,13 +340,13 @@ export class ConceptJourneyView extends ItemView {
     const actions = this.journeyContainer.createEl('div', { cls: 'journey-actions' });
 
     const analyzeBtn = actions.createEl('button', {
-      text: '🤖 AI Analysis',
+      text: 'Analyse with AI',
       cls: 'journey-action-btn analyze-btn'
     });
     analyzeBtn.addEventListener('click', () => this.runAnalysis());
 
     const linksBtn = actions.createEl('button', {
-      text: '🔗 Generate Forward Links',
+      text: 'Add forward links',
       cls: 'journey-action-btn links-btn'
     });
     linksBtn.addEventListener('click', () => this.generateLinks());
@@ -376,10 +376,14 @@ export class ConceptJourneyView extends ItemView {
       const content = step.createEl('div', { cls: 'step-content' });
 
       const fileHeader = content.createEl('div', { cls: 'step-file-header' });
-      const fileLink = fileHeader.createEl('a', {
-        text: file.split('/').pop() || file,
+      // A button rather than an anchor, so it is reachable by keyboard.
+      const fileName = file.split('/').pop() || file;
+      const fileLink = fileHeader.createEl('button', {
+        text: fileName,
         cls: 'step-file-link'
       });
+      fileLink.type = 'button';
+      fileLink.setAttribute('aria-label', `Open ${fileName}`);
       fileLink.addEventListener('click', () => {
         if (this.onOpenFile) this.onOpenFile(file);
       });
@@ -392,9 +396,8 @@ export class ConceptJourneyView extends ItemView {
       }
 
       for (const [type, count] of typeGroups) {
-        const badge = typeBadges.createEl('span', {
-          cls: `type-badge type-${type.toLowerCase()}`
-        });
+        const badge = typeBadges.createEl('span', { cls: 'type-badge' });
+        badge.dataset.color = String(hashToColorSlot(type));
         badge.createEl('span', { text: type });
         if (count > 1) {
           badge.createEl('span', { text: ` (${count})`, cls: 'type-count' });
@@ -413,7 +416,7 @@ export class ConceptJourneyView extends ItemView {
     // Related concepts section
     if (journey.relatedConcepts.length > 0) {
       const relatedSection = this.journeyContainer.createEl('div', { cls: 'journey-related' });
-      relatedSection.createEl('h5', { text: 'Related Concepts' });
+      relatedSection.createEl('h5', { text: 'Related concepts' });
 
       const relatedList = relatedSection.createEl('div', { cls: 'related-list' });
       for (const related of journey.relatedConcepts) {
@@ -441,7 +444,7 @@ export class ConceptJourneyView extends ItemView {
     this.analysisContainer.addClass('visible');
 
     const loading = this.analysisContainer.createEl('div', { cls: 'analysis-loading' });
-    loading.createEl('span', { text: '🤖 Analyzing concept journey...' });
+    loading.createEl('span', { text: 'Analysing…' });
 
     try {
       const analysis = await this.onAnalyzeRequest(this.currentJourney);
@@ -463,17 +466,17 @@ export class ConceptJourneyView extends ItemView {
     this.analysisContainer.addClass('visible');
 
     const header = this.analysisContainer.createEl('div', { cls: 'analysis-header' });
-    header.createEl('h4', { text: '🤖 AI Analysis' });
+    header.createEl('h4', { text: 'AI analysis' });
 
     // Narrative
     const narrativeSection = this.analysisContainer.createEl('div', { cls: 'analysis-section' });
-    narrativeSection.createEl('h5', { text: '📖 Narrative Summary' });
+    narrativeSection.createEl('h5', { text: 'Narrative' });
     narrativeSection.createEl('p', { text: analysis.narrative, cls: 'narrative-text' });
 
     // Contradictions
     if (analysis.contradictions.length > 0) {
       const contradictionsSection = this.analysisContainer.createEl('div', { cls: 'analysis-section contradictions' });
-      contradictionsSection.createEl('h5', { text: '⚠️ Potential Contradictions' });
+      contradictionsSection.createEl('h5', { text: 'Possible contradictions' });
       const list = contradictionsSection.createEl('ul');
       for (const item of analysis.contradictions) {
         list.createEl('li', { text: item });
@@ -483,7 +486,7 @@ export class ConceptJourneyView extends ItemView {
     // Gaps
     if (analysis.gaps.length > 0) {
       const gapsSection = this.analysisContainer.createEl('div', { cls: 'analysis-section gaps' });
-      gapsSection.createEl('h5', { text: '🔍 Logical Gaps' });
+      gapsSection.createEl('h5', { text: 'Gaps in the argument' });
       const list = gapsSection.createEl('ul');
       for (const item of analysis.gaps) {
         list.createEl('li', { text: item });
@@ -493,7 +496,7 @@ export class ConceptJourneyView extends ItemView {
     // Suggestions
     if (analysis.suggestions.length > 0) {
       const suggestionsSection = this.analysisContainer.createEl('div', { cls: 'analysis-section suggestions' });
-      suggestionsSection.createEl('h5', { text: '💡 Suggestions' });
+      suggestionsSection.createEl('h5', { text: 'Suggestions' });
       const list = suggestionsSection.createEl('ul');
       for (const item of analysis.suggestions) {
         list.createEl('li', { text: item });
@@ -509,24 +512,24 @@ export class ConceptJourneyView extends ItemView {
 
     const btn = this.journeyContainer.querySelector('.links-btn') as HTMLButtonElement;
     if (btn) {
-      btn.textContent = 'Generating...';
+      btn.setText('Adding…');
       btn.disabled = true;
     }
 
     try {
       await this.onGenerateForwardLinks(this.currentJourney);
       if (btn) {
-        btn.textContent = '✓ Links Generated';
+        btn.setText('Links added');
       }
     } catch (error) {
       if (btn) {
-        btn.textContent = '❌ Failed';
+        btn.setText('Failed');
       }
     }
 
-    setTimeout(() => {
+    window.setTimeout(() => {
       if (btn) {
-        btn.textContent = '🔗 Generate Forward Links';
+        btn.setText('Add forward links');
         btn.disabled = false;
       }
     }, 2000);

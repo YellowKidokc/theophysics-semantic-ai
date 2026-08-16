@@ -1,217 +1,174 @@
 /**
- * Index Confirmation Modal
- * Shows cost estimate and confirmation before indexing
+ * Modals for building the concept index: confirm, progress, and folder picker.
  */
 
-import { App, Modal, Setting, TFolder, Notice } from 'obsidian';
+import { App, Modal, Setting, TFolder } from 'obsidian';
 import { IndexCostEstimate } from '../indexing/vault-indexer';
 
-/**
- * Index Confirmation Modal
- */
 export class IndexConfirmationModal extends Modal {
   private indexScope: 'folder' | 'vault';
   private scopePath: string;
   private estimate: IndexCostEstimate;
   private onConfirm: () => void;
-  private onCancel: () => void;
 
   constructor(
     app: App,
     scope: 'folder' | 'vault',
     scopePath: string,
     estimate: IndexCostEstimate,
-    onConfirm: () => void,
-    onCancel: () => void
+    onConfirm: () => void
   ) {
     super(app);
     this.indexScope = scope;
     this.scopePath = scopePath;
     this.estimate = estimate;
     this.onConfirm = onConfirm;
-    this.onCancel = onCancel;
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, titleEl } = this;
     contentEl.addClass('semantic-ai-index-modal');
 
-    // Title
-    contentEl.createEl('h2', {
-      text: this.indexScope === 'vault' ? 'Index Entire Vault' : 'Index Folder'
-    });
+    titleEl.setText(this.indexScope === 'vault' ? 'Index the whole vault' : 'Index a folder');
 
-    // Scope info
     contentEl.createEl('p', {
       text: this.indexScope === 'vault'
-        ? 'This will scan all markdown files in your vault.'
-        : `This will scan all markdown files in: ${this.scopePath}`
+        ? 'Scans every markdown note in the vault for tags this plugin has written.'
+        : `Scans every markdown note in ${this.scopePath} for tags this plugin has written.`
     });
 
-    // Estimate section
-    const estimateSection = contentEl.createEl('div', { cls: 'semantic-ai-estimate-section' });
-    estimateSection.createEl('h4', { text: 'Estimate' });
+    const estimateSection = contentEl.createDiv({ cls: 'semantic-ai-estimate-section' });
+    const estimateGrid = estimateSection.createDiv({ cls: 'semantic-ai-estimate-grid' });
 
-    const estimateGrid = estimateSection.createEl('div', { cls: 'semantic-ai-estimate-grid' });
+    this.addEstimateItem(estimateGrid, 'Notes to scan', String(this.estimate.fileCount));
+    this.addEstimateItem(estimateGrid, 'Characters', this.estimate.totalCharacters.toLocaleString());
+    this.addEstimateItem(estimateGrid, 'Approximate tokens', this.estimate.estimatedTokens.toLocaleString());
 
-    this.addEstimateItem(estimateGrid, 'Files to scan', String(this.estimate.fileCount));
-    this.addEstimateItem(estimateGrid, 'Total characters', this.estimate.totalCharacters.toLocaleString());
-    this.addEstimateItem(estimateGrid, 'Estimated tokens', `~${this.estimate.estimatedTokens.toLocaleString()}`);
+    contentEl.createEl('p', {
+      cls: 'semantic-ai-cost-note',
+      text: 'Indexing reads tags that are already in your notes. It makes no AI requests and costs nothing.'
+    });
 
-    // Warning for vault-wide
-    if (this.indexScope === 'vault' || this.estimate.fileCount > 50) {
-      const warningEl = contentEl.createEl('div', { cls: 'semantic-ai-index-warning' });
-
-      if (this.estimate.warning) {
-        warningEl.createEl('p', { text: `⚠️ ${this.estimate.warning}` });
-      }
-
-      if (this.indexScope === 'vault') {
-        warningEl.createEl('p', {
-          text: '💡 Tip: Consider indexing specific folders instead for faster results and lower costs.'
-        });
-      }
-
-      // Cost disclaimer
-      warningEl.createEl('p', {
-        cls: 'semantic-ai-cost-note',
-        text: 'Note: Indexing reads existing tags from files. No AI API calls are made during indexing - it only scans what you\'ve already classified.'
+    if (this.estimate.warning) {
+      contentEl.createEl('p', {
+        cls: 'semantic-ai-index-warning',
+        text: this.estimate.warning
       });
     }
 
-    // What this does
-    const infoSection = contentEl.createEl('div', { cls: 'semantic-ai-index-info' });
-    infoSection.createEl('h4', { text: 'What this does:' });
+    if (this.indexScope === 'vault') {
+      contentEl.createEl('p', {
+        cls: 'semantic-ai-muted',
+        text: 'Indexing one folder at a time is faster on a large vault.'
+      });
+    }
 
+    const infoSection = contentEl.createDiv({ cls: 'semantic-ai-index-info' });
+    infoSection.createEl('p', { text: 'The index gives you:' });
     const infoList = infoSection.createEl('ul');
-    infoList.createEl('li', { text: 'Scans all tagged notes in the selected scope' });
-    infoList.createEl('li', { text: 'Builds a cross-reference index of all concepts' });
-    infoList.createEl('li', { text: 'Tracks where each concept appears' });
-    infoList.createEl('li', { text: 'Finds relationships between documents' });
-    infoList.createEl('li', { text: 'Identifies concepts that span multiple files' });
+    infoList.createEl('li', { text: 'A cross-reference of every tagged concept' });
+    infoList.createEl('li', { text: 'Where each concept appears' });
+    infoList.createEl('li', { text: 'Which notes share concepts, and how strongly' });
 
-    // Actions
-    const actionsEl = contentEl.createEl('div', { cls: 'semantic-ai-actions' });
-
-    const cancelBtn = actionsEl.createEl('button', { text: 'Cancel' });
-    cancelBtn.onclick = () => {
-      this.onCancel();
-      this.close();
-    };
-
-    const confirmBtn = actionsEl.createEl('button', {
-      cls: 'mod-cta',
-      text: this.indexScope === 'vault' ? 'Index Vault' : 'Index Folder'
-    });
-    confirmBtn.onclick = () => {
-      this.onConfirm();
-      this.close();
-    };
+    new Setting(contentEl)
+      .addButton(button => {
+        button.setButtonText('Cancel').onClick(() => this.close());
+      })
+      .addButton(button => {
+        button
+          .setButtonText(this.indexScope === 'vault' ? 'Index vault' : 'Index folder')
+          .setCta()
+          .onClick(() => {
+            this.onConfirm();
+            this.close();
+          });
+        window.setTimeout(() => button.buttonEl.focus(), 0);
+      });
   }
 
   private addEstimateItem(container: HTMLElement, label: string, value: string): void {
-    const item = container.createEl('div', { cls: 'semantic-ai-estimate-item' });
-    item.createEl('span', { cls: 'semantic-ai-estimate-label', text: label });
-    item.createEl('span', { cls: 'semantic-ai-estimate-value', text: value });
+    const item = container.createDiv({ cls: 'semantic-ai-estimate-item' });
+    item.createSpan({ cls: 'semantic-ai-estimate-label', text: label });
+    item.createSpan({ cls: 'semantic-ai-estimate-value', text: value });
   }
 
   onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.contentEl.empty();
   }
 }
 
-/**
- * Index Progress Modal
- */
 export class IndexProgressModal extends Modal {
-  private progressEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
   private currentFileEl: HTMLElement | null = null;
   private progressBar: HTMLElement | null = null;
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, titleEl } = this;
     contentEl.addClass('semantic-ai-progress-modal');
 
-    contentEl.createEl('h2', { text: 'Building Index...' });
+    titleEl.setText('Building index');
 
     this.statusEl = contentEl.createEl('p', { cls: 'semantic-ai-progress-status' });
-    this.statusEl.textContent = 'Starting...';
+    this.statusEl.setAttribute('role', 'status');
+    this.statusEl.setAttribute('aria-live', 'polite');
+    this.statusEl.setText('Starting…');
 
-    // Progress bar
-    const progressContainer = contentEl.createEl('div', { cls: 'semantic-ai-progress-bar-container' });
-    this.progressBar = progressContainer.createEl('div', { cls: 'semantic-ai-progress-bar' });
-    this.progressBar.style.width = '0%';
+    const progressContainer = contentEl.createDiv({ cls: 'semantic-ai-progress-bar-container' });
+    progressContainer.setAttribute('role', 'progressbar');
+    progressContainer.setAttribute('aria-valuemin', '0');
+    progressContainer.setAttribute('aria-valuemax', '100');
+    progressContainer.setAttribute('aria-valuenow', '0');
+    progressContainer.setAttribute('aria-label', 'Indexing progress');
 
-    this.currentFileEl = contentEl.createEl('p', {
-      cls: 'semantic-ai-current-file',
-      text: ''
-    });
+    // Width comes from a CSS custom property; the stylesheet owns the rest.
+    this.progressBar = progressContainer.createDiv({ cls: 'semantic-ai-progress-bar' });
+    this.setProgress(0);
 
-    this.progressEl = contentEl.createEl('div', { cls: 'semantic-ai-progress-log' });
+    this.currentFileEl = contentEl.createEl('p', { cls: 'semantic-ai-current-file' });
   }
 
-  /**
-   * Update progress
-   */
+  private setProgress(percent: number): void {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    this.progressBar?.setCssProps({ '--semantic-ai-progress': `${clamped}%` });
+    this.progressBar?.parentElement?.setAttribute('aria-valuenow', String(clamped));
+  }
+
   updateProgress(current: number, total: number, fileName: string): void {
-    const percent = Math.round((current / total) * 100);
+    const percent = total > 0 ? (current / total) * 100 : 0;
 
-    if (this.statusEl) {
-      this.statusEl.textContent = `Processing ${current} of ${total} files (${percent}%)`;
-    }
-
-    if (this.progressBar) {
-      this.progressBar.style.width = `${percent}%`;
-    }
-
-    if (this.currentFileEl) {
-      this.currentFileEl.textContent = `Current: ${fileName}`;
-    }
+    this.statusEl?.setText(`Processing ${current} of ${total} notes (${Math.round(percent)}%)`);
+    this.setProgress(percent);
+    this.currentFileEl?.setText(fileName);
   }
 
-  /**
-   * Mark as complete
-   */
   complete(stats: { files: number; concepts: number; relations: number; timeMs: number }): void {
-    if (this.statusEl) {
-      this.statusEl.textContent = '✅ Index complete!';
-    }
+    this.statusEl?.setText('Index complete.');
+    this.setProgress(100);
+    this.progressBar?.addClass('complete');
+    this.currentFileEl?.setText('');
 
-    if (this.progressBar) {
-      this.progressBar.style.width = '100%';
-      this.progressBar.addClass('complete');
-    }
+    const statsEl = this.contentEl.createDiv({ cls: 'semantic-ai-index-stats' });
+    const list = statsEl.createEl('ul');
+    list.createEl('li', { text: `Notes indexed: ${stats.files}` });
+    list.createEl('li', { text: `Concepts found: ${stats.concepts}` });
+    list.createEl('li', { text: `Relationships: ${stats.relations}` });
+    list.createEl('li', { text: `Time taken: ${(stats.timeMs / 1000).toFixed(2)}s` });
 
-    if (this.currentFileEl) {
-      this.currentFileEl.textContent = '';
-    }
-
-    // Show stats
-    const statsEl = this.contentEl.createEl('div', { cls: 'semantic-ai-index-stats' });
-    statsEl.createEl('p', { text: `📁 Files indexed: ${stats.files}` });
-    statsEl.createEl('p', { text: `🏷️ Concepts found: ${stats.concepts}` });
-    statsEl.createEl('p', { text: `🔗 Relationships: ${stats.relations}` });
-    statsEl.createEl('p', { text: `⏱️ Time: ${(stats.timeMs / 1000).toFixed(2)}s` });
-
-    // Close button
-    const closeBtn = this.contentEl.createEl('button', {
-      cls: 'mod-cta',
-      text: 'View Results'
-    });
-    closeBtn.onclick = () => this.close();
+    new Setting(this.contentEl)
+      .addButton(button => {
+        button
+          .setButtonText('Close')
+          .setCta()
+          .onClick(() => this.close());
+        window.setTimeout(() => button.buttonEl.focus(), 0);
+      });
   }
 
   onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.contentEl.empty();
   }
 }
 
-/**
- * Folder Selection Modal
- */
 export class FolderSelectionModal extends Modal {
   private folders: TFolder[];
   private onSelect: (folder: TFolder) => void;
@@ -223,39 +180,38 @@ export class FolderSelectionModal extends Modal {
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, titleEl } = this;
     contentEl.addClass('semantic-ai-folder-modal');
 
-    contentEl.createEl('h2', { text: 'Select Folder to Index' });
-    contentEl.createEl('p', { text: 'Choose a folder to build a concept index:' });
+    titleEl.setText('Choose a folder to index');
 
-    const folderList = contentEl.createEl('div', { cls: 'semantic-ai-folder-list' });
+    const folderList = contentEl.createDiv({ cls: 'semantic-ai-folder-list' });
+    const sorted = [...this.folders].sort((a, b) => a.path.localeCompare(b.path));
 
-    // Sort folders by path
-    const sortedFolders = [...this.folders].sort((a, b) => a.path.localeCompare(b.path));
-
-    for (const folder of sortedFolders) {
-      const folderItem = folderList.createEl('button', {
+    sorted.forEach((folder, index) => {
+      const item = folderList.createEl('button', {
         cls: 'semantic-ai-folder-item',
-        text: folder.path || '/ (Root)'
+        text: folder.isRoot() ? 'Vault root' : folder.path
       });
+      item.type = 'button';
 
-      folderItem.onclick = () => {
+      item.addEventListener('click', () => {
         this.onSelect(folder);
         this.close();
-      };
-    }
+      });
 
-    // Cancel button
-    const cancelBtn = contentEl.createEl('button', {
-      cls: 'semantic-ai-cancel-btn',
-      text: 'Cancel'
+      if (index === 0) {
+        window.setTimeout(() => item.focus(), 0);
+      }
     });
-    cancelBtn.onclick = () => this.close();
+
+    new Setting(contentEl)
+      .addButton(button => {
+        button.setButtonText('Cancel').onClick(() => this.close());
+      });
   }
 
   onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.contentEl.empty();
   }
 }

@@ -5,11 +5,13 @@
 
 import { TFile, Vault } from 'obsidian';
 import { SemanticTag, TagType, ParsedTag } from '../types';
-import { generateUUID, globalUUIDRegistry } from './uuid-generator';
+import { globalUUIDRegistry } from './uuid-generator';
 import { ConceptRegistry } from './concept-registry';
 
-// Tag format: %%tag::TYPE::UUID::"Label"::parent_UUID%%
-const TAG_REGEX = /%%tag::([^:]+)::([^:]+)::"([^"]+)"::([^%]*)%%/g;
+// Tag format: %%tag::TYPE::UUID::"Label"::PARENT%% with an optional trailing
+// ::@topic,topic segment. The TYPE group allows one embedded colon so custom
+// types written as Custom:keyword round-trip correctly.
+const TAG_REGEX = /%%tag::([^:%]+(?::[^:%]+)*)::([^:%]+)::"([^"]*)"::([^:%]*)(?:::@([^%]*))?%%/g;
 const TAG_BLOCK_START = '\n\n%%--- SEMANTIC TAGS ---%%\n';
 const TAG_BLOCK_END = '\n%%--- END SEMANTIC TAGS ---%%';
 
@@ -88,7 +90,16 @@ export function createTagWithRegistry(
 export function formatTag(tag: SemanticTag): string {
   const parentPart = tag.parentUuid || 'null';
   const typePart = tag.customType ? `Custom:${tag.customType}` : tag.type;
-  return `%%tag::${typePart}::${tag.uuid}::"${tag.label}"::${parentPart}%%`;
+
+  // Colons and quotes would break the delimiter, so they are stripped here
+  // rather than producing a tag line that cannot be parsed back.
+  const label = tag.label.replace(/["\n]/g, ' ').trim();
+
+  const topicPart = tag.topics?.length
+    ? `::@${tag.topics.map(t => t.replace(/[^A-Za-z0-9_-]/g, '')).join(',')}`
+    : '';
+
+  return `%%tag::${typePart}::${tag.uuid}::"${label}"::${parentPart}${topicPart}%%`;
 }
 
 /**
@@ -103,21 +114,26 @@ export function parseTags(content: string): ParsedTag[] {
     TAG_REGEX.lastIndex = 0;
 
     while ((match = TAG_REGEX.exec(line)) !== null) {
-      let type: TagType = match[1] as TagType;
+      let type: TagType = match[1];
       let customType: string | undefined;
 
-      // Handle custom types
+      // Custom classifier output is stored as Custom:keyword.
       if (match[1].startsWith('Custom:')) {
         type = 'Custom';
-        customType = match[1].replace('Custom:', '');
+        customType = match[1].slice('Custom:'.length);
       }
+
+      const topics = match[5]
+        ? match[5].split(',').map(t => t.trim()).filter(Boolean)
+        : undefined;
 
       const tag: SemanticTag = {
         type,
         uuid: match[2],
         label: match[3],
-        parentUuid: match[4] === 'null' ? null : match[4],
-        customType
+        parentUuid: match[4] === 'null' || match[4] === '' ? null : match[4],
+        customType,
+        topics
       };
 
       tags.push({
@@ -190,37 +206,32 @@ export async function writeTags(
   tags: SemanticTag[],
   append: boolean = true
 ): Promise<void> {
-  let content = await vault.read(file);
+  // Vault.process reads and writes in one atomic step, so a note being edited
+  // at the same time is not silently overwritten.
+  await vault.process(file, (content) => {
+    if (append && hasTagBlock(content)) {
+      const existingTags = parseTags(content);
+      const existingUuids = new Set(existingTags.map(pt => pt.tag.uuid));
 
-  if (append && hasTagBlock(content)) {
-    // Parse existing tags and merge
-    const existingTags = parseTags(content);
-    const existingUuids = new Set(existingTags.map(pt => pt.tag.uuid));
+      const newTags = tags.filter(tag => !existingUuids.has(tag.uuid));
+      const allTags = [...existingTags.map(pt => pt.tag), ...newTags];
 
-    // Filter out duplicates
-    const newTags = tags.filter(tag => !existingUuids.has(tag.uuid));
-    const allTags = [...existingTags.map(pt => pt.tag), ...newTags];
+      return removeTagBlock(content).trimEnd() + createTagBlock(allTags);
+    }
 
-    // Remove old block and add new one
-    content = removeTagBlock(content);
-    content = content.trimEnd() + createTagBlock(allTags);
-  } else if (hasTagBlock(content)) {
-    // Replace existing block
-    content = removeTagBlock(content);
-    content = content.trimEnd() + createTagBlock(tags);
-  } else {
-    // Append new block
-    content = content.trimEnd() + createTagBlock(tags);
-  }
+    if (hasTagBlock(content)) {
+      return removeTagBlock(content).trimEnd() + createTagBlock(tags);
+    }
 
-  await vault.modify(file, content);
+    return content.trimEnd() + createTagBlock(tags);
+  });
 }
 
 /**
  * Read tags from a file
  */
 export async function readTags(vault: Vault, file: TFile): Promise<SemanticTag[]> {
-  const content = await vault.read(file);
+  const content = await vault.cachedRead(file);
   return parseTags(content).map(pt => pt.tag);
 }
 
@@ -232,18 +243,17 @@ export async function removeTags(
   file: TFile,
   uuidsToRemove: string[]
 ): Promise<void> {
-  const content = await vault.read(file);
-  const existingTags = parseTags(content);
-  const remainingTags = existingTags
-    .filter(pt => !uuidsToRemove.includes(pt.tag.uuid))
-    .map(pt => pt.tag);
+  await vault.process(file, (content) => {
+    const remainingTags = parseTags(content)
+      .filter(pt => !uuidsToRemove.includes(pt.tag.uuid))
+      .map(pt => pt.tag);
 
-  let newContent = removeTagBlock(content);
-  if (remainingTags.length > 0) {
-    newContent = newContent.trimEnd() + createTagBlock(remainingTags);
-  }
+    const stripped = removeTagBlock(content);
 
-  await vault.modify(file, newContent);
+    return remainingTags.length > 0
+      ? stripped.trimEnd() + createTagBlock(remainingTags)
+      : stripped;
+  });
 }
 
 /**
@@ -255,20 +265,14 @@ export async function updateTag(
   uuid: string,
   updates: Partial<SemanticTag>
 ): Promise<void> {
-  const content = await vault.read(file);
-  const existingTags = parseTags(content);
+  await vault.process(file, (content) => {
+    const updatedTags = parseTags(content).map(pt =>
+      // The UUID is the identity of the tag, so it is never overwritten.
+      pt.tag.uuid === uuid ? { ...pt.tag, ...updates, uuid } : pt.tag
+    );
 
-  const updatedTags = existingTags.map(pt => {
-    if (pt.tag.uuid === uuid) {
-      return { ...pt.tag, ...updates, uuid }; // Preserve UUID
-    }
-    return pt.tag;
+    return removeTagBlock(content).trimEnd() + createTagBlock(updatedTags);
   });
-
-  let newContent = removeTagBlock(content);
-  newContent = newContent.trimEnd() + createTagBlock(updatedTags);
-
-  await vault.modify(file, newContent);
 }
 
 /**

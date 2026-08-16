@@ -1,16 +1,24 @@
 /**
  * Prompt Manager
- * Manages prompts for each tag type and custom classifiers
+ * Builds prompts from the user's own categories and topics — nothing about the
+ * wording here assumes a particular subject area.
  */
 
 import {
-  TagType, Domain, DEFAULT_PROMPTS, DEFAULT_DOMAIN_PROMPT, ALL_DOMAINS,
-  CKG_TYPES, PromptTemplate, CustomClassifier, SemanticAISettings
+  TagType,
+  CategoryDefinition,
+  CustomClassifier,
+  SemanticAISettings,
+  TAXONOMY_PRESETS,
+  categoryPlural,
+  enabledCategories,
+  enabledCategoryIds,
+  enabledTopics,
+  getCategory,
+  getPreset,
+  topicsActive
 } from '../types';
 
-/**
- * Prompt Manager class for handling all prompt-related operations
- */
 export class PromptManager {
   private settings: SemanticAISettings;
 
@@ -18,111 +26,79 @@ export class PromptManager {
     this.settings = settings;
   }
 
-  /**
-   * Update settings reference
-   */
   updateSettings(settings: SemanticAISettings): void {
     this.settings = settings;
   }
 
-  /**
-   * Get prompt for a specific tag type
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Categories                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  getCategories(): CategoryDefinition[] {
+    return this.settings.categories;
+  }
+
+  getEnabledCategoryIds(): TagType[] {
+    return enabledCategoryIds(this.settings);
+  }
+
   getPrompt(type: TagType): string {
-    return this.settings.prompts[type] || DEFAULT_PROMPTS[type];
+    return getCategory(this.settings, type)?.prompt || '';
   }
 
-  /**
-   * Set prompt for a specific tag type
-   */
   setPrompt(type: TagType, prompt: string): void {
-    this.settings.prompts[type] = prompt;
+    const category = getCategory(this.settings, type);
+    if (category) {
+      category.prompt = prompt;
+    }
   }
 
   /**
-   * Reset prompt to default for a specific tag type
+   * The prompt this category ships with, preferring the preset currently
+   * loaded. Returns null for categories the user invented themselves.
    */
-  resetPrompt(type: TagType): void {
-    this.settings.prompts[type] = DEFAULT_PROMPTS[type];
+  getStockPrompt(type: TagType): string | null {
+    const current = getPreset(this.settings.presetId);
+    const fromCurrent = current?.categories.find(c => c.id === type);
+    if (fromCurrent) {
+      return fromCurrent.prompt;
+    }
+
+    for (const preset of TAXONOMY_PRESETS) {
+      const match = preset.categories.find(c => c.id === type);
+      if (match) {
+        return match.prompt;
+      }
+    }
+
+    return null;
   }
 
-  /**
-   * Reset all prompts to defaults
-   */
-  resetAllPrompts(): void {
-    this.settings.prompts = { ...DEFAULT_PROMPTS };
-  }
-
-  /**
-   * Get all prompt templates
-   */
-  getAllPrompts(): PromptTemplate[] {
-    const tagTypes: TagType[] = [
-      // CKG epistemic types (Axis 1)
-      'Axiom', 'Claim', 'Hypothesis', 'Definition', 'Theory',
-      'Observation', 'Law', 'Theorem', 'Lemma', 'Canonical', 'EvidenceBundle',
-      // Structural / relational types
-      'ScientificProcess', 'Relationship', 'InternalLink', 'ExternalLink',
-      'ProperName', 'ForwardLink', 'WordOntology', 'Sentence', 'Paragraph'
-    ];
-
-    return tagTypes.map(type => ({
-      type,
-      name: this.getTagTypeName(type),
-      prompt: this.getPrompt(type),
-      isDefault: this.isDefaultPrompt(type)
-    }));
-  }
-
-  /**
-   * Check if a prompt is the default
-   */
   isDefaultPrompt(type: TagType): boolean {
-    return this.settings.prompts[type] === DEFAULT_PROMPTS[type];
+    const stock = this.getStockPrompt(type);
+    return stock !== null && stock === this.getPrompt(type);
   }
 
-  /**
-   * Get human-readable name for tag type
-   */
+  resetPrompt(type: TagType): boolean {
+    const stock = this.getStockPrompt(type);
+    if (stock === null) return false;
+    this.setPrompt(type, stock);
+    return true;
+  }
+
+  /** Display name for a category id — the plural form used in summaries. */
   getTagTypeName(type: TagType): string {
-    const names: Record<TagType, string> = {
-      // CKG epistemic types
-      Axiom: 'Axioms',
-      Claim: 'Claims',
-      Hypothesis: 'Hypotheses',
-      Definition: 'Definitions',
-      Theory: 'Theories',
-      Observation: 'Observations',
-      Law: 'Laws',
-      Theorem: 'Theorems',
-      Lemma: 'Lemmas',
-      Canonical: 'Canonical Elements',
-      EvidenceBundle: 'Evidence Bundles',
-      // Structural types
-      ScientificProcess: 'Scientific Processes',
-      Relationship: 'Relationships',
-      InternalLink: 'Internal Links',
-      ExternalLink: 'External Links',
-      ProperName: 'Proper Names',
-      ForwardLink: 'Forward Links',
-      WordOntology: 'Word Ontology',
-      Sentence: 'Sentences',
-      Paragraph: 'Paragraphs',
-      Custom: 'Custom'
-    };
-    return names[type] || type;
+    return categoryPlural(this.settings, type);
   }
 
-  /**
-   * Get custom classifiers
-   */
+  /* ---------------------------------------------------------------------- */
+  /* Custom classifiers                                                     */
+  /* ---------------------------------------------------------------------- */
+
   getCustomClassifiers(): CustomClassifier[] {
     return this.settings.customClassifiers || [];
   }
 
-  /**
-   * Add a custom classifier
-   */
   addCustomClassifier(keyword: string, prompt: string): CustomClassifier {
     const classifier: CustomClassifier = {
       id: `custom-${Date.now()}`,
@@ -139,9 +115,6 @@ export class PromptManager {
     return classifier;
   }
 
-  /**
-   * Update a custom classifier
-   */
   updateCustomClassifier(id: string, updates: Partial<CustomClassifier>): void {
     const classifiers = this.settings.customClassifiers || [];
     const index = classifiers.findIndex(c => c.id === id);
@@ -151,86 +124,105 @@ export class PromptManager {
     }
   }
 
-  /**
-   * Remove a custom classifier
-   */
   removeCustomClassifier(id: string): void {
     this.settings.customClassifiers = (this.settings.customClassifiers || [])
       .filter(c => c.id !== id);
   }
 
-  /**
-   * Find custom classifier by keyword
-   */
   findClassifierByKeyword(keyword: string): CustomClassifier | undefined {
     return (this.settings.customClassifiers || [])
       .find(c => c.enabled && c.keyword.toLowerCase() === keyword.toLowerCase());
   }
 
-  /**
-   * Build the full classification prompt
-   */
-  buildClassificationPrompt(content: string, types: TagType[]): string {
-    const systemPrompt = this.buildSystemPrompt(types);
-    const userPrompt = this.buildUserPrompt(content);
+  /* ---------------------------------------------------------------------- */
+  /* Prompt construction                                                    */
+  /* ---------------------------------------------------------------------- */
 
-    return `${systemPrompt}\n\n${userPrompt}`;
+  /** Optional framing line the user sets in settings. */
+  private contextLine(): string {
+    const context = (this.settings.systemContext || '').trim();
+    return context ? `\n\nContext for this vault: ${context}` : '';
   }
 
-  /**
-   * Build system prompt with all selected tag types
-   */
+  private axisLabel(): string {
+    return (this.settings.axis2Label || 'Topic').trim() || 'Topic';
+  }
+
+  /** The axis-2 instructions, or an empty string when axis 2 is off. */
+  private topicSection(): string {
+    if (!topicsActive(this.settings)) {
+      return '';
+    }
+
+    const label = this.axisLabel();
+    const list = enabledTopics(this.settings)
+      .map(t => (t.description ? `- ${t.id}: ${t.description}` : `- ${t.id}`))
+      .join('\n');
+
+    const extra = (this.settings.topicPrompt || '').trim();
+    const extraSection = extra ? `\n\n${extra}` : '';
+
+    return `\n\n## ${label} assignment\nFor each element, also decide which of the following ${label.toLowerCase()} values apply. An element may have several, or none.\n\n${list}${extraSection}`;
+  }
+
+  private topicField(): string {
+    if (!topicsActive(this.settings)) {
+      return '';
+    }
+    const ids = enabledTopics(this.settings).map(t => t.id);
+    return `\n- "topics": An array of ${this.axisLabel().toLowerCase()} values from this list: ${ids.join(', ')}`;
+  }
+
+  private topicExample(index: number): string {
+    if (!topicsActive(this.settings)) {
+      return '';
+    }
+    const ids = enabledTopics(this.settings).map(t => t.id);
+    const picked = ids[index % ids.length];
+    return `, "topics": ["${picked}"]`;
+  }
+
+  buildClassificationPrompt(content: string, types: TagType[]): string {
+    return `${this.buildSystemPrompt(types)}\n\n${this.buildUserPrompt(content)}`;
+  }
+
   buildSystemPrompt(types: TagType[]): string {
-    const domainEnabled = this.settings.enableDomainMapping;
-    const domainFields = domainEnabled
-      ? `\n- "domains": An array of domain strings indicating where this element resonates (e.g. ["Physics", "Mathematics"]). Valid domains: ${ALL_DOMAINS.join(', ')}`
-      : '';
+    const selected = types.length > 0 ? types : this.getEnabledCategoryIds();
+    const categories = selected
+      .map(id => getCategory(this.settings, id))
+      .filter((c): c is CategoryDefinition => Boolean(c));
 
-    const domainExample = domainEnabled
-      ? `, "domains": ["Physics", "Mathematics"]`
-      : '';
+    const usable = categories.length > 0 ? categories : enabledCategories(this.settings);
+    const ids = usable.map(c => c.id);
 
-    const domainExample2 = domainEnabled
-      ? `, "domains": ["Physics", "Theology"]`
-      : '';
+    const exampleA = ids[0] || 'Note';
+    const exampleB = ids[1] || exampleA;
 
-    const header = `You are a semantic analysis AI for the Theophysics Canonical Knowledge Graph (CKG). Your task is to classify text elements on two axes:
-  Axis 1 — "What is this?" (epistemic type)
-  Axis 2 — "Where does this resonate?" (domain mapping)
+    const header = `You are a semantic analysis assistant. You read a document and label the elements you find.${this.contextLine()}
 
-Output format: Return a JSON array of objects. Each object must have:
-- "type": The tag type (one of: ${types.join(', ')})
-- "label": A concise, descriptive label for the identified element
-- "parentLabel": (optional) The label of a parent element if this is nested
-- "confidence": (optional) A confidence score from 0 to 1${domainFields}
+Output format: return a JSON array of objects. Each object must have:
+- "type": the category id, one of: ${ids.join(', ')}
+- "label": a concise, descriptive label for the element
+- "parentLabel": (optional) the label of a parent element, when one element sits under another
+- "confidence": (optional) a score from 0 to 1${this.topicField()}
 
 Example output:
 [
-  {"type": "Axiom", "label": "Conservation of Energy", "confidence": 0.95${domainExample}},
-  {"type": "Claim", "label": "The Logos field unifies physical and theological reality", "parentLabel": "Conservation of Energy", "confidence": 0.85${domainExample2}}
+  {"type": "${exampleA}", "label": "A short label naming the element", "confidence": 0.9${this.topicExample(0)}},
+  {"type": "${exampleB}", "label": "Another element that follows from the first", "parentLabel": "A short label naming the element", "confidence": 0.8${this.topicExample(1)}}
 ]
 
-Tag Type Definitions:`;
+Category definitions:`;
 
-    const definitions = types.map(type => {
-      const prompt = this.getPrompt(type);
-      return `\n### ${type}\n${prompt}`;
-    }).join('\n');
+    const definitions = usable
+      .map(c => `\n### ${c.id} (${c.name})\n${c.prompt}`)
+      .join('\n');
 
-    let domainSection = '';
-    if (domainEnabled) {
-      const domainPrompt = this.settings.domainMappingPrompt || DEFAULT_DOMAIN_PROMPT;
-      domainSection = `\n\n## Domain Mapping (Axis 2)\n${domainPrompt}`;
-    }
-
-    return `${header}${definitions}${domainSection}`;
+    return `${header}${definitions}${this.topicSection()}`;
   }
 
-  /**
-   * Build user prompt with content
-   */
   buildUserPrompt(content: string): string {
-    return `Analyze the following text and identify all semantic elements according to the definitions above. Return ONLY valid JSON, no other text.
+    return `Analyze the following text and identify every element that fits the categories above. Return ONLY valid JSON, no other text.
 
 ---
 TEXT TO ANALYZE:
@@ -240,27 +232,23 @@ ${content}
 JSON Response:`;
   }
 
-  /**
-   * Build prompt for a specific tag type only
-   */
   buildSingleTypePrompt(content: string, type: TagType): string {
-    const prompt = this.getPrompt(type);
-    const domainEnabled = this.settings.enableDomainMapping;
-    const domainField = domainEnabled
-      ? `\n- "domains": Array of resonance domains (${ALL_DOMAINS.join(', ')})`
-      : '';
-    const domainInstruction = domainEnabled
-      ? `\nAlso identify which knowledge domains each element resonates in.`
+    const category = getCategory(this.settings, type);
+    const name = category?.plural || type;
+    const prompt = category?.prompt || `Identify every ${type} in the text.`;
+
+    const topicInstruction = topicsActive(this.settings)
+      ? `\nAlso assign each element the ${this.axisLabel().toLowerCase()} values that apply.`
       : '';
 
-    return `You are a semantic analysis AI for the Theophysics CKG. Your task is to identify ${this.getTagTypeName(type)} in the given text.${domainInstruction}
+    return `You are a semantic analysis assistant. Your task is to identify ${name} in the given text.${this.contextLine()}${topicInstruction}
 
 ${prompt}
 
-Output format: Return a JSON array of objects. Each object must have:
+Output format: return a JSON array of objects. Each object must have:
 - "type": "${type}"
-- "label": A concise, descriptive label
-- "confidence": (optional) A confidence score from 0 to 1${domainField}
+- "label": a concise, descriptive label
+- "confidence": (optional) a score from 0 to 1${this.topicField()}${this.topicSection()}
 
 Return ONLY valid JSON, no other text.
 
@@ -272,20 +260,17 @@ ${content}
 JSON Response:`;
   }
 
-  /**
-   * Build prompt for custom classifier
-   */
   buildCustomClassifierPrompt(content: string, classifier: CustomClassifier): string {
-    return `You are a semantic analysis AI. Your task is to analyze text according to custom criteria.
+    return `You are a semantic analysis assistant analyzing text against custom criteria.${this.contextLine()}
 
-Custom Classifier: ${classifier.keyword}
+Custom classifier: ${classifier.keyword}
 Instructions: ${classifier.prompt}
 
-Output format: Return a JSON array of objects. Each object must have:
+Output format: return a JSON array of objects. Each object must have:
 - "type": "Custom"
 - "customType": "${classifier.keyword}"
-- "label": A concise, descriptive label
-- "confidence": (optional) A confidence score from 0 to 1
+- "label": a concise, descriptive label
+- "confidence": (optional) a score from 0 to 1
 
 Return ONLY valid JSON, no other text.
 
@@ -298,8 +283,7 @@ JSON Response:`;
   }
 
   /**
-   * Build prompt for concept journey analysis
-   * Analyzes the evolution of a concept across multiple documents
+   * Prompt for analysing how one concept develops across several notes.
    */
   buildConceptJourneyPrompt(
     concept: string,
@@ -307,79 +291,126 @@ JSON Response:`;
     occurrences: { file: string; type: string; label: string }[]
   ): string {
     const aliasText = aliases.length > 0
-      ? `\nAliases/Related terms: ${aliases.join(', ')}`
+      ? `\nAliases and related terms: ${aliases.join(', ')}`
       : '';
 
     const occurrenceList = occurrences.map((o, i) =>
-      `${i + 1}. File: "${o.file}"\n   Type: ${o.type}\n   Label: "${o.label}"`
+      `${i + 1}. File: "${o.file}"\n   Category: ${o.type}\n   Label: "${o.label}"`
     ).join('\n\n');
 
-    return `You are analyzing the evolution of a concept across multiple academic documents/notes.
+    return `You are analyzing how a single concept develops across a set of notes.${this.contextLine()}
 
 CONCEPT: "${concept}"${aliasText}
 
 OCCURRENCES (in document order):
 ${occurrenceList}
 
-TASK: Analyze how this concept evolves across these documents. Provide your analysis as a JSON object with the following structure:
+TASK: describe how this concept evolves across these documents. Return a JSON object with this structure:
 
 {
-  "narrative": "A 2-4 sentence narrative describing how this concept develops across the documents. Note any shifts in meaning, growing complexity, or evolution of understanding.",
-  "contradictions": [
-    "List any potential contradictions or tensions between how the concept is used in different documents. Return empty array if none."
-  ],
-  "gaps": [
-    "List any logical gaps - places where the reasoning jumps without support, or where evidence is missing. Return empty array if none."
-  ],
-  "suggestions": [
-    "List suggestions for strengthening the argument chain - additional evidence needed, connections to explore, or concepts to define more clearly. Return empty array if none."
-  ]
+  "narrative": "2-4 sentences describing how the concept develops. Note shifts in meaning, growing complexity, or changes of understanding.",
+  "contradictions": ["Tensions between how the concept is used in different documents. Empty array if none."],
+  "gaps": ["Places where the reasoning jumps without support, or where evidence is missing. Empty array if none."],
+  "suggestions": ["Ways to strengthen the chain: evidence needed, connections to explore, terms to define. Empty array if none."]
 }
 
 Important:
-- Be specific and reference actual file names when discussing contradictions or gaps
-- Focus on the intellectual journey of understanding, not just listing where it appears
-- If the concept appears consistently without evolution, note that in the narrative
+- Be specific and name actual files when discussing contradictions or gaps
+- Focus on the development of the idea, not just where it appears
+- If the concept appears consistently without evolution, say so in the narrative
 - Return ONLY valid JSON, no other text
 
 JSON Response:`;
   }
 
-  /**
-   * Export prompts to JSON
-   */
-  exportPrompts(): string {
+  /* ---------------------------------------------------------------------- */
+  /* Import / export                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  /** Export the whole taxonomy so it can be shared or reused in another vault. */
+  exportTaxonomy(): string {
     return JSON.stringify({
-      prompts: this.settings.prompts,
+      version: 2,
+      presetId: this.settings.presetId,
+      systemContext: this.settings.systemContext,
+      axis2Label: this.settings.axis2Label,
+      categories: this.settings.categories,
+      topics: this.settings.topics,
+      topicPrompt: this.settings.topicPrompt,
       customClassifiers: this.settings.customClassifiers
     }, null, 2);
   }
 
   /**
-   * Import prompts from JSON
+   * Import a taxonomy. Accepts both the current format and the v1 format,
+   * which was a flat map of category id to prompt.
    */
-  importPrompts(json: string): void {
+  importTaxonomy(json: string): void {
+    let data: Record<string, unknown>;
+
     try {
-      const data = JSON.parse(json);
+      data = JSON.parse(json) as Record<string, unknown>;
+    } catch {
+      throw new Error('That file is not valid JSON.');
+    }
 
-      if (data.prompts) {
-        this.settings.prompts = { ...DEFAULT_PROMPTS, ...data.prompts };
+    if (Array.isArray(data.categories)) {
+      const categories = data.categories as CategoryDefinition[];
+      if (categories.length === 0) {
+        throw new Error('That file contains no categories.');
       }
+      this.settings.categories = categories.map((c, i) => ({
+        id: String(c.id || `Category${i + 1}`),
+        name: String(c.name || c.id || `Category ${i + 1}`),
+        plural: String(c.plural || c.name || c.id || `Category ${i + 1}`),
+        prompt: String(c.prompt || ''),
+        color: Number(c.color) || (i % 8) + 1,
+        enabled: c.enabled !== false
+      }));
+      this.settings.presetId = 'custom';
+    } else if (data.prompts && typeof data.prompts === 'object') {
+      // v1 format: { prompts: { Axiom: "…" } }
+      const prompts = data.prompts as Record<string, string>;
+      for (const [id, prompt] of Object.entries(prompts)) {
+        const existing = getCategory(this.settings, id);
+        if (existing) {
+          existing.prompt = prompt;
+        }
+      }
+    } else {
+      throw new Error('That file has no categories or prompts in it.');
+    }
 
-      if (data.customClassifiers) {
-        this.settings.customClassifiers = data.customClassifiers;
-      }
-    } catch (error) {
-      throw new Error('Invalid prompt configuration JSON');
+    if (Array.isArray(data.topics)) {
+      this.settings.topics = (data.topics as Record<string, unknown>[]).map((t, i) => ({
+        id: String(t.id || `Topic${i + 1}`),
+        name: String(t.name || t.id || `Topic ${i + 1}`),
+        description: String(t.description || ''),
+        enabled: t.enabled !== false
+      }));
+    }
+
+    if (typeof data.systemContext === 'string') {
+      this.settings.systemContext = data.systemContext;
+    }
+    if (typeof data.axis2Label === 'string' && data.axis2Label.trim()) {
+      this.settings.axis2Label = data.axis2Label;
+    }
+    if (typeof data.topicPrompt === 'string') {
+      this.settings.topicPrompt = data.topicPrompt;
+    }
+    if (Array.isArray(data.customClassifiers)) {
+      this.settings.customClassifiers = data.customClassifiers as CustomClassifier[];
     }
   }
 }
 
-/**
- * Token estimation utilities
- */
+/* -------------------------------------------------------------------------- */
+/* Token and cost estimation                                                  */
+/* -------------------------------------------------------------------------- */
+
 export function estimateTokens(text: string): number {
-  // Rough estimate: ~4 characters per token for English text
+  // Rough estimate: ~4 characters per token for English text.
   return Math.ceil(text.length / 4);
 }
 
@@ -387,25 +418,47 @@ export function estimatePromptTokens(prompt: string, content: string): number {
   return estimateTokens(prompt) + estimateTokens(content);
 }
 
+/**
+ * Approximate USD per million tokens. Providers change these, so the numbers
+ * are a planning aid rather than a quote — matched by longest name prefix so
+ * dated model ids resolve to their family.
+ */
+const PRICING: { prefix: string; input: number; output: number }[] = [
+  { prefix: 'gpt-4o-mini', input: 0.15, output: 0.60 },
+  { prefix: 'gpt-4o', input: 2.50, output: 10.00 },
+  { prefix: 'gpt-4.1-mini', input: 0.40, output: 1.60 },
+  { prefix: 'gpt-4.1', input: 2.00, output: 8.00 },
+  { prefix: 'gpt-4-turbo', input: 10.00, output: 30.00 },
+  { prefix: 'gpt-3.5-turbo', input: 0.50, output: 1.50 },
+  { prefix: 'deepseek-reasoner', input: 0.55, output: 2.19 },
+  { prefix: 'deepseek-chat', input: 0.27, output: 1.10 },
+  { prefix: 'claude-3-5-haiku', input: 0.80, output: 4.00 },
+  { prefix: 'claude-3-haiku', input: 0.25, output: 1.25 },
+  { prefix: 'claude-3-5-sonnet', input: 3.00, output: 15.00 },
+  { prefix: 'claude-sonnet', input: 3.00, output: 15.00 },
+  { prefix: 'claude-opus', input: 15.00, output: 75.00 },
+  { prefix: 'claude-3-opus', input: 15.00, output: 75.00 }
+];
+
 export function estimateCost(
   inputTokens: number,
   outputTokens: number,
   model: string
 ): number {
-  // Pricing per 1M tokens (approximate, may vary)
-  const pricing: Record<string, { input: number; output: number }> = {
-    'gpt-4o': { input: 2.50, output: 10.00 },
-    'gpt-4o-mini': { input: 0.15, output: 0.60 },
-    'gpt-4-turbo': { input: 10.00, output: 30.00 },
-    'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
-    'claude-3-opus': { input: 15.00, output: 75.00 },
-    'claude-3-sonnet': { input: 3.00, output: 15.00 },
-    'claude-3-haiku': { input: 0.25, output: 1.25 }
-  };
+  const name = (model || '').toLowerCase();
 
-  const modelPricing = pricing[model] || pricing['gpt-4o-mini'];
-  const inputCost = (inputTokens / 1_000_000) * modelPricing.input;
-  const outputCost = (outputTokens / 1_000_000) * modelPricing.output;
+  // Local models cost nothing to run.
+  if (!name) {
+    return 0;
+  }
 
-  return inputCost + outputCost;
+  const match = PRICING
+    .filter(p => name.startsWith(p.prefix))
+    .sort((a, b) => b.prefix.length - a.prefix.length)[0];
+
+  if (!match) {
+    return 0;
+  }
+
+  return (inputTokens / 1_000_000) * match.input + (outputTokens / 1_000_000) * match.output;
 }
